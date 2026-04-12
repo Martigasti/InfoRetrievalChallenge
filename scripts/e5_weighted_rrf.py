@@ -1,16 +1,18 @@
 """
-3-way RRF: SPECTER2 + MiniLM + BM25 with RRF k tuning.
+3-way RRF: SPECTER2 + E5-large-v2 + BM25.
 
-Improvements over specter2_minilm_rrf.py:
-- BM25 as third retriever (lexical matching for exact terms)
-- Top-200 per retriever before fusion (more candidates)
-- Grid search over RRF k parameter to optimize NDCG@10
-- BM25 uses NLTK stemming + stopword removal for proper tokenization
+Improvements over three_way_rrf.py:
+1. E5-large-v2 replaces MiniLM: instruction-tuned for relevance matching,
+   better at abstract/conceptual domains (Philosophy, Geography, Engineering).
+   Uses 'query: ' / 'passage: ' prefixes to guide the model.
+3. More body chunks (3 → 6): abstract papers bury key concepts in later
+   sections; more context improves recall on those domains.
 """
 
 import json
 import os
 import sys
+import zipfile
 from collections import defaultdict
 from pathlib import Path
 
@@ -19,16 +21,17 @@ from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from utils import (
-    load_queries, load_corpus, load_qrels, load_embeddings,
+    load_queries, load_corpus, load_qrels,
     format_text, get_body_chunks, evaluate,
 )
 
-RETRIEVAL_TOP_K = 200  # per retriever, before fusion
+RETRIEVAL_TOP_K = 200
 FINAL_TOP_K = 100
-RRF_K = 10  # best from grid search
+RRF_K = 10
+BODY_CHUNKS = 6
 SPECTER_MODEL = "allenai/specter2_base"
 PROXIMITY_ADAPTER = "allenai/specter2_proximity"
-DENSE_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
+E5_MODEL_NAME = "intfloat/e5-large-v2"
 
 ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = ROOT / "data"
@@ -39,14 +42,13 @@ HELD_OUT_PATH = ROOT / "held_out_queries.parquet"
 # ── Text formatting ──────────────────────────────────────────
 
 def format_specter(row):
-    """SPECTER2: 'title [SEP] abstract + first body chunks'."""
     title = str(row.get("title", "") or "").strip()
     abstract = str(row.get("abstract", "") or "").strip()
     body_extra = ""
     try:
         chunks = get_body_chunks(row, min_chars=50)
         if chunks:
-            body_extra = " ".join(chunks[:3])
+            body_extra = " ".join(chunks[:BODY_CHUNKS])
     except Exception:
         pass
     parts = [p for p in [title, abstract, body_extra] if p]
@@ -56,12 +58,11 @@ def format_specter(row):
 
 
 def format_enriched(row):
-    """MiniLM/BM25: title + abstract + first body chunks."""
     base = format_text(row)
     try:
         chunks = get_body_chunks(row, min_chars=50)
         if chunks:
-            base += " " + " ".join(chunks[:3])
+            base += " " + " ".join(chunks[:BODY_CHUNKS])
     except Exception:
         pass
     return base
@@ -93,11 +94,9 @@ def dense_retrieve(query_embs, q_ids, corpus_embs, c_ids, top_k):
 
 
 def bm25_tokenize(text):
-    """Tokenize with NLTK stemming and stopword removal."""
     from nltk.stem import PorterStemmer
     from nltk.corpus import stopwords
     import re
-
     stemmer = PorterStemmer()
     stops = set(stopwords.words("english"))
     tokens = re.findall(r"[a-z0-9]+", text.lower())
@@ -114,9 +113,9 @@ def bm25_retrieve(query_texts, q_ids, corpus_tokenized, c_ids, bm25_model, top_k
     return results
 
 
-# ── Fusion ───────────────────────────────────────────────────
+# ── RRF ──────────────────────────────────────────────────────
 
-def rrf_fuse(rankings_list, k=60, top_k=100):
+def rrf_fuse(rankings_list, k=10, top_k=100):
     all_qids = set()
     for r in rankings_list:
         all_qids.update(r.keys())
@@ -144,7 +143,6 @@ def main():
     from sentence_transformers import SentenceTransformer
     from rank_bm25 import BM25Okapi
 
-    # Ensure NLTK data is available
     nltk.download("stopwords", quiet=True)
     nltk.download("punkt", quiet=True)
 
@@ -160,9 +158,10 @@ def main():
     corpus_ids = corpus["doc_id"].tolist()
     query_domains = dict(zip(queries["doc_id"], queries["domain"]))
 
-    # ── Build enriched texts ──
+    print(f"Building enriched text (body_chunks={BODY_CHUNKS})...")
     corpus_enriched = [format_enriched(row) for _, row in corpus.iterrows()]
     corpus_specter = [format_specter(row) for _, row in corpus.iterrows()]
+    corpus_e5 = ["passage: " + t for t in corpus_enriched]
 
     # ── BM25 index ──
     print("Tokenizing corpus for BM25 (stemmed)...")
@@ -182,12 +181,13 @@ def main():
     specter_corpus_embs = encode_specter(corpus_specter, tokenizer,
                                           specter_model, batch_size=32, device=device)
 
-    # ── MiniLM ──
-    minilm_model = SentenceTransformer(DENSE_MODEL_NAME)
-    print("Encoding corpus with MiniLM...")
-    minilm_corpus_embs = minilm_model.encode(corpus_enriched,
-                                              normalize_embeddings=True,
-                                              show_progress_bar=True).astype(np.float32)
+    # ── E5-large ──
+    print(f"\nLoading {E5_MODEL_NAME}...")
+    e5_model = SentenceTransformer(E5_MODEL_NAME)
+    print("Encoding corpus with E5-large...")
+    e5_corpus_embs = e5_model.encode(corpus_e5,
+                                      normalize_embeddings=True,
+                                      show_progress_bar=True).astype(np.float32)
 
     # ══════════════════════════════════════════════════════════════
     # Public queries — evaluate
@@ -195,66 +195,56 @@ def main():
     pub_ids = queries["doc_id"].tolist()
     pub_enriched = [format_enriched(row) for _, row in queries.iterrows()]
     pub_specter = [format_specter(row) for _, row in queries.iterrows()]
+    pub_e5 = ["query: " + t for t in pub_enriched]
 
-    # MiniLM retrieval
-    print("\nMiniLM retrieval...")
-    minilm_q_embs = minilm_model.encode(pub_enriched, normalize_embeddings=True,
-                                         show_progress_bar=True).astype(np.float32)
-    minilm_ranking = dense_retrieve(minilm_q_embs, pub_ids,
-                                     minilm_corpus_embs, corpus_ids, top_k=RETRIEVAL_TOP_K)
+    print("\nE5 retrieval...")
+    e5_q_embs = e5_model.encode(pub_e5, normalize_embeddings=True,
+                                 show_progress_bar=True).astype(np.float32)
+    e5_ranking = dense_retrieve(e5_q_embs, pub_ids,
+                                 e5_corpus_embs, corpus_ids, top_k=RETRIEVAL_TOP_K)
 
-    # SPECTER2 retrieval
     print("SPECTER2 retrieval...")
     specter_q_embs = encode_specter(pub_specter, tokenizer,
                                      specter_model, batch_size=32, device=device)
     specter_ranking = dense_retrieve(specter_q_embs, pub_ids,
                                       specter_corpus_embs, corpus_ids, top_k=RETRIEVAL_TOP_K)
 
-    # BM25 retrieval
     print("BM25 retrieval...")
     bm25_ranking = bm25_retrieve(pub_enriched, pub_ids, corpus_tokenized,
                                   corpus_ids, bm25, top_k=RETRIEVAL_TOP_K)
 
-    # 3-way RRF with best k
-    fused_best = rrf_fuse([minilm_ranking, specter_ranking, bm25_ranking],
-                           k=RRF_K, top_k=FINAL_TOP_K)
-    print(f"\n--- 3-way RRF (k={RRF_K}) ---")
-    evaluate(fused_best, qrels, ks=[10, 100], query_domains=query_domains, verbose=True)
+    fused = rrf_fuse([specter_ranking, e5_ranking, bm25_ranking], k=RRF_K, top_k=FINAL_TOP_K)
+    print("\n--- 3-way RRF (SPECTER2 + E5-large + BM25) ---")
+    evaluate(fused, qrels, ks=[10, 100], query_domains=query_domains, verbose=True)
 
     # ══════════════════════════════════════════════════════════════
-    # Held-out queries — predict (using best k)
+    # Held-out queries — predict
     # ══════════════════════════════════════════════════════════════
     ho_ids = held_out["doc_id"].tolist()
     ho_enriched = [format_enriched(row) for _, row in held_out.iterrows()]
     ho_specter_texts = [format_specter(row) for _, row in held_out.iterrows()]
+    ho_e5_texts = ["query: " + t for t in ho_enriched]
 
-    # MiniLM
-    print("\nMiniLM (held-out)...")
-    ho_minilm_embs = minilm_model.encode(ho_enriched, normalize_embeddings=True,
-                                          show_progress_bar=True).astype(np.float32)
-    ho_minilm = dense_retrieve(ho_minilm_embs, ho_ids,
-                                minilm_corpus_embs, corpus_ids, top_k=RETRIEVAL_TOP_K)
+    print("\nE5 (held-out)...")
+    ho_e5_embs = e5_model.encode(ho_e5_texts, normalize_embeddings=True,
+                                  show_progress_bar=True).astype(np.float32)
+    ho_e5 = dense_retrieve(ho_e5_embs, ho_ids,
+                            e5_corpus_embs, corpus_ids, top_k=RETRIEVAL_TOP_K)
 
-    # SPECTER2
     print("SPECTER2 (held-out)...")
     ho_specter_embs = encode_specter(ho_specter_texts, tokenizer,
                                       specter_model, batch_size=32, device=device)
     ho_specter = dense_retrieve(ho_specter_embs, ho_ids,
                                  specter_corpus_embs, corpus_ids, top_k=RETRIEVAL_TOP_K)
 
-    # BM25
     print("BM25 (held-out)...")
     ho_bm25 = bm25_retrieve(ho_enriched, ho_ids, corpus_tokenized,
                               corpus_ids, bm25, top_k=RETRIEVAL_TOP_K)
 
-    # Fuse with best k
-    ho_fused = rrf_fuse([ho_minilm, ho_specter, ho_bm25], k=RRF_K, top_k=FINAL_TOP_K)
+    ho_fused = rrf_fuse([ho_specter, ho_e5, ho_bm25], k=RRF_K, top_k=FINAL_TOP_K)
 
-    # Save
     os.makedirs(SUBMISSIONS_DIR, exist_ok=True)
-    import zipfile
-    os.makedirs(SUBMISSIONS_DIR, exist_ok=True)
-    zip_path = SUBMISSIONS_DIR / "three_way_rrf.zip"
+    zip_path = SUBMISSIONS_DIR / "submission.zip"
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
         zf.writestr("submission_data.json", json.dumps(ho_fused))
     print(f"\nSaved -> {zip_path} (contains submission_data.json)")

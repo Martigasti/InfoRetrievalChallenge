@@ -1,16 +1,22 @@
 """
-3-way RRF: SPECTER2 + MiniLM + BM25 with RRF k tuning.
+Phase 2: Reranker on top of bge_weighted_rrf.
 
-Improvements over specter2_minilm_rrf.py:
-- BM25 as third retriever (lexical matching for exact terms)
-- Top-200 per retriever before fusion (more candidates)
-- Grid search over RRF k parameter to optimize NDCG@10
-- BM25 uses NLTK stemming + stopword removal for proper tokenization
+Pipeline:
+  1. Run the full SPECTER2 + BGE-large + BM25 weighted RRF (same as bge_weighted_rrf.py)
+  2. Take top-20 from the fused ranking
+  3. Rerank those 20 with BAAI/bge-reranker-v2-m3 (a cross-encoder trained
+     on diverse multilingual + academic data — unlike MS-MARCO rerankers
+     which failed on paper-to-paper matching)
+  4. Put the reranked top-20 at positions 1..20, keep positions 21..100 unchanged
+
+NDCG@10 only looks at the top 10 — reranking 20 gives a small buffer but
+keeps the cross-encoder cost low (20 pairs per query, not 100).
 """
 
 import json
 import os
 import sys
+import zipfile
 from collections import defaultdict
 from pathlib import Path
 
@@ -19,16 +25,21 @@ from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from utils import (
-    load_queries, load_corpus, load_qrels, load_embeddings,
+    load_queries, load_corpus, load_qrels,
     format_text, get_body_chunks, evaluate,
 )
 
-RETRIEVAL_TOP_K = 200  # per retriever, before fusion
+RETRIEVAL_TOP_K = 200
 FINAL_TOP_K = 100
-RRF_K = 10  # best from grid search
+RERANK_TOP_K = 20       # rerank the top-20 from RRF
+RRF_K = 10
+BODY_CHUNKS = 6
 SPECTER_MODEL = "allenai/specter2_base"
 PROXIMITY_ADAPTER = "allenai/specter2_proximity"
-DENSE_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
+BGE_MODEL_NAME = "BAAI/bge-large-en-v1.5"
+RERANKER_NAME = "BAAI/bge-reranker-v2-m3"
+RERANKER_MAX_LEN = 512
+RERANKER_BATCH_SIZE = 32
 
 ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = ROOT / "data"
@@ -39,14 +50,13 @@ HELD_OUT_PATH = ROOT / "held_out_queries.parquet"
 # ── Text formatting ──────────────────────────────────────────
 
 def format_specter(row):
-    """SPECTER2: 'title [SEP] abstract + first body chunks'."""
     title = str(row.get("title", "") or "").strip()
     abstract = str(row.get("abstract", "") or "").strip()
     body_extra = ""
     try:
         chunks = get_body_chunks(row, min_chars=50)
         if chunks:
-            body_extra = " ".join(chunks[:3])
+            body_extra = " ".join(chunks[:BODY_CHUNKS])
     except Exception:
         pass
     parts = [p for p in [title, abstract, body_extra] if p]
@@ -56,15 +66,23 @@ def format_specter(row):
 
 
 def format_enriched(row):
-    """MiniLM/BM25: title + abstract + first body chunks."""
     base = format_text(row)
     try:
         chunks = get_body_chunks(row, min_chars=50)
         if chunks:
-            base += " " + " ".join(chunks[:3])
+            base += " " + " ".join(chunks[:BODY_CHUNKS])
     except Exception:
         pass
     return base
+
+
+def format_rerank(row):
+    """Reranker input: title + abstract (short, since cross-encoder truncates at 512)."""
+    title = str(row.get("title", "") or "").strip()
+    abstract = str(row.get("abstract", "") or "").strip()
+    if title and abstract:
+        return title + ". " + abstract
+    return title or abstract
 
 
 # ── Encoding ─────────────────────────────────────────────────
@@ -93,11 +111,9 @@ def dense_retrieve(query_embs, q_ids, corpus_embs, c_ids, top_k):
 
 
 def bm25_tokenize(text):
-    """Tokenize with NLTK stemming and stopword removal."""
     from nltk.stem import PorterStemmer
     from nltk.corpus import stopwords
     import re
-
     stemmer = PorterStemmer()
     stops = set(stopwords.words("english"))
     tokens = re.findall(r"[a-z0-9]+", text.lower())
@@ -114,24 +130,53 @@ def bm25_retrieve(query_texts, q_ids, corpus_tokenized, c_ids, bm25_model, top_k
     return results
 
 
-# ── Fusion ───────────────────────────────────────────────────
+# ── Weighted RRF ─────────────────────────────────────────────
 
-def rrf_fuse(rankings_list, k=60, top_k=100):
+def weighted_rrf_fuse(rankings_with_weights, k=10, top_k=100):
+    """score(d) = sum_r weight_r / (k + rank_r(d))"""
     all_qids = set()
-    for r in rankings_list:
-        all_qids.update(r.keys())
+    for ranking, _ in rankings_with_weights:
+        all_qids.update(ranking.keys())
 
     fused = {}
     for qid in all_qids:
         scores = defaultdict(float)
-        for ranking in rankings_list:
+        for ranking, weight in rankings_with_weights:
             if qid not in ranking:
                 continue
             for rank, doc_id in enumerate(ranking[qid], start=1):
-                scores[doc_id] += 1.0 / (k + rank)
+                scores[doc_id] += weight / (k + rank)
         sorted_docs = sorted(scores.items(), key=lambda x: -x[1])
         fused[qid] = [doc_id for doc_id, _ in sorted_docs[:top_k]]
     return fused
+
+
+# ── Reranking ────────────────────────────────────────────────
+
+def rerank_topk(fused_ranking, query_texts_by_id, doc_text_by_id,
+                reranker, top_rerank=20, device="cpu"):
+    """
+    For each query:
+      - take top-`top_rerank` doc IDs from fused_ranking
+      - score (query_text, doc_text) pairs with the cross-encoder
+      - reorder those `top_rerank` by cross-encoder score
+      - tail (positions top_rerank..end) stays unchanged
+    """
+    reranked = {}
+    qids = list(fused_ranking.keys())
+    for qid in tqdm(qids, desc="Reranking"):
+        ranked = fused_ranking[qid]
+        head = ranked[:top_rerank]
+        tail = ranked[top_rerank:]
+        q_text = query_texts_by_id[qid]
+        pairs = [(q_text, doc_text_by_id[d]) for d in head]
+        scores = reranker.predict(pairs,
+                                  batch_size=RERANKER_BATCH_SIZE,
+                                  show_progress_bar=False)
+        order = np.argsort(-np.asarray(scores))
+        new_head = [head[i] for i in order]
+        reranked[qid] = new_head + tail
+    return reranked
 
 
 # ── Main ─────────────────────────────────────────────────────
@@ -141,10 +186,9 @@ def main():
     import nltk
     from transformers import AutoTokenizer, AutoModel
     from adapters import init as adapters_init
-    from sentence_transformers import SentenceTransformer
+    from sentence_transformers import SentenceTransformer, CrossEncoder
     from rank_bm25 import BM25Okapi
 
-    # Ensure NLTK data is available
     nltk.download("stopwords", quiet=True)
     nltk.download("punkt", quiet=True)
 
@@ -160,9 +204,14 @@ def main():
     corpus_ids = corpus["doc_id"].tolist()
     query_domains = dict(zip(queries["doc_id"], queries["domain"]))
 
-    # ── Build enriched texts ──
+    print(f"Building enriched text (body_chunks={BODY_CHUNKS})...")
     corpus_enriched = [format_enriched(row) for _, row in corpus.iterrows()]
     corpus_specter = [format_specter(row) for _, row in corpus.iterrows()]
+
+    # Short text for reranker — indexed by doc_id
+    corpus_rerank_by_id = {
+        row["doc_id"]: format_rerank(row) for _, row in corpus.iterrows()
+    }
 
     # ── BM25 index ──
     print("Tokenizing corpus for BM25 (stemmed)...")
@@ -182,81 +231,124 @@ def main():
     specter_corpus_embs = encode_specter(corpus_specter, tokenizer,
                                           specter_model, batch_size=32, device=device)
 
-    # ── MiniLM ──
-    minilm_model = SentenceTransformer(DENSE_MODEL_NAME)
-    print("Encoding corpus with MiniLM...")
-    minilm_corpus_embs = minilm_model.encode(corpus_enriched,
-                                              normalize_embeddings=True,
-                                              show_progress_bar=True).astype(np.float32)
+    # ── BGE-large ──
+    print(f"\nLoading {BGE_MODEL_NAME}...")
+    bge_model = SentenceTransformer(BGE_MODEL_NAME, device=device)
+    print("Encoding corpus with BGE-large...")
+    bge_corpus_embs = bge_model.encode(corpus_enriched,
+                                        normalize_embeddings=True,
+                                        show_progress_bar=True).astype(np.float32)
 
     # ══════════════════════════════════════════════════════════════
-    # Public queries — evaluate
+    # Public queries — retrieve
     # ══════════════════════════════════════════════════════════════
     pub_ids = queries["doc_id"].tolist()
     pub_enriched = [format_enriched(row) for _, row in queries.iterrows()]
     pub_specter = [format_specter(row) for _, row in queries.iterrows()]
+    pub_rerank_by_id = {
+        row["doc_id"]: format_rerank(row) for _, row in queries.iterrows()
+    }
 
-    # MiniLM retrieval
-    print("\nMiniLM retrieval...")
-    minilm_q_embs = minilm_model.encode(pub_enriched, normalize_embeddings=True,
-                                         show_progress_bar=True).astype(np.float32)
-    minilm_ranking = dense_retrieve(minilm_q_embs, pub_ids,
-                                     minilm_corpus_embs, corpus_ids, top_k=RETRIEVAL_TOP_K)
+    print("\nBGE retrieval...")
+    bge_q_embs = bge_model.encode(pub_enriched, normalize_embeddings=True,
+                                   show_progress_bar=True).astype(np.float32)
+    bge_ranking = dense_retrieve(bge_q_embs, pub_ids,
+                                  bge_corpus_embs, corpus_ids, top_k=RETRIEVAL_TOP_K)
 
-    # SPECTER2 retrieval
     print("SPECTER2 retrieval...")
     specter_q_embs = encode_specter(pub_specter, tokenizer,
                                      specter_model, batch_size=32, device=device)
     specter_ranking = dense_retrieve(specter_q_embs, pub_ids,
                                       specter_corpus_embs, corpus_ids, top_k=RETRIEVAL_TOP_K)
 
-    # BM25 retrieval
     print("BM25 retrieval...")
     bm25_ranking = bm25_retrieve(pub_enriched, pub_ids, corpus_tokenized,
                                   corpus_ids, bm25, top_k=RETRIEVAL_TOP_K)
 
-    # 3-way RRF with best k
-    fused_best = rrf_fuse([minilm_ranking, specter_ranking, bm25_ranking],
-                           k=RRF_K, top_k=FINAL_TOP_K)
-    print(f"\n--- 3-way RRF (k={RRF_K}) ---")
-    evaluate(fused_best, qrels, ks=[10, 100], query_domains=query_domains, verbose=True)
+    # Free dense models from GPU before loading the reranker
+    print("\nFreeing dense models from GPU for reranker...")
+    specter_model.to("cpu")
+    bge_model.to("cpu")
+    torch.cuda.empty_cache()
+
+    # ── Fuse with best weights from bge_weighted_rrf (bm25_w=0.5) ──
+    BM25_WEIGHT = 0.5
+    fused = weighted_rrf_fuse(
+        [(specter_ranking, 1.0), (bge_ranking, 1.0), (bm25_ranking, BM25_WEIGHT)],
+        k=RRF_K, top_k=FINAL_TOP_K,
+    )
+
+    print("\n--- Weighted RRF (no reranker) baseline ---")
+    evaluate(fused, qrels, ks=[10, 100], query_domains=query_domains, verbose=True)
+
+    # ── Reranker ──
+    print(f"\nLoading {RERANKER_NAME}...")
+    reranker = CrossEncoder(RERANKER_NAME, max_length=RERANKER_MAX_LEN, device=device)
+
+    print(f"Reranking top-{RERANK_TOP_K} of each query...")
+    reranked = rerank_topk(
+        fused, pub_rerank_by_id, corpus_rerank_by_id,
+        reranker, top_rerank=RERANK_TOP_K, device=device,
+    )
+
+    print(f"\n--- Weighted RRF + BGE reranker (top-{RERANK_TOP_K}) ---")
+    evaluate(reranked, qrels, ks=[10, 100], query_domains=query_domains, verbose=True)
 
     # ══════════════════════════════════════════════════════════════
-    # Held-out queries — predict (using best k)
+    # Held-out queries — predict
     # ══════════════════════════════════════════════════════════════
     ho_ids = held_out["doc_id"].tolist()
     ho_enriched = [format_enriched(row) for _, row in held_out.iterrows()]
     ho_specter_texts = [format_specter(row) for _, row in held_out.iterrows()]
+    ho_rerank_by_id = {
+        row["doc_id"]: format_rerank(row) for _, row in held_out.iterrows()
+    }
 
-    # MiniLM
-    print("\nMiniLM (held-out)...")
-    ho_minilm_embs = minilm_model.encode(ho_enriched, normalize_embeddings=True,
-                                          show_progress_bar=True).astype(np.float32)
-    ho_minilm = dense_retrieve(ho_minilm_embs, ho_ids,
-                                minilm_corpus_embs, corpus_ids, top_k=RETRIEVAL_TOP_K)
+    # Put dense models back on GPU, move reranker off
+    print("\nSwapping reranker off GPU for held-out retrieval...")
+    reranker.model.to("cpu")
+    torch.cuda.empty_cache()
+    specter_model.to(device)
+    bge_model.to(device)
 
-    # SPECTER2
+    print("BGE (held-out)...")
+    ho_bge_embs = bge_model.encode(ho_enriched, normalize_embeddings=True,
+                                    show_progress_bar=True).astype(np.float32)
+    ho_bge = dense_retrieve(ho_bge_embs, ho_ids,
+                             bge_corpus_embs, corpus_ids, top_k=RETRIEVAL_TOP_K)
+
     print("SPECTER2 (held-out)...")
     ho_specter_embs = encode_specter(ho_specter_texts, tokenizer,
                                       specter_model, batch_size=32, device=device)
     ho_specter = dense_retrieve(ho_specter_embs, ho_ids,
                                  specter_corpus_embs, corpus_ids, top_k=RETRIEVAL_TOP_K)
 
-    # BM25
     print("BM25 (held-out)...")
     ho_bm25 = bm25_retrieve(ho_enriched, ho_ids, corpus_tokenized,
                               corpus_ids, bm25, top_k=RETRIEVAL_TOP_K)
 
-    # Fuse with best k
-    ho_fused = rrf_fuse([ho_minilm, ho_specter, ho_bm25], k=RRF_K, top_k=FINAL_TOP_K)
+    ho_fused = weighted_rrf_fuse(
+        [(ho_specter, 1.0), (ho_bge, 1.0), (ho_bm25, BM25_WEIGHT)],
+        k=RRF_K, top_k=FINAL_TOP_K,
+    )
 
-    # Save
+    # Free dense models, put reranker back
+    print("\nSwapping dense models off GPU for reranker (held-out)...")
+    specter_model.to("cpu")
+    bge_model.to("cpu")
+    torch.cuda.empty_cache()
+    reranker.model.to(device)
+
+    print(f"Reranking top-{RERANK_TOP_K} on held-out...")
+    ho_reranked = rerank_topk(
+        ho_fused, ho_rerank_by_id, corpus_rerank_by_id,
+        reranker, top_rerank=RERANK_TOP_K, device=device,
+    )
+
     os.makedirs(SUBMISSIONS_DIR, exist_ok=True)
-    import zipfile
-    os.makedirs(SUBMISSIONS_DIR, exist_ok=True)
-    zip_path = SUBMISSIONS_DIR / "three_way_rrf.zip"
+    zip_path = SUBMISSIONS_DIR / "submission.zip"
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-        zf.writestr("submission_data.json", json.dumps(ho_fused))
+        zf.writestr("submission_data.json", json.dumps(ho_reranked))
     print(f"\nSaved -> {zip_path} (contains submission_data.json)")
 
 
