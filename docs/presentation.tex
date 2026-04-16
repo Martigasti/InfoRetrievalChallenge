@@ -14,6 +14,8 @@
 \usepackage{amsmath}
 \usepackage{tikz}
 \usetikzlibrary{arrows.meta, positioning, calc}
+\usepackage{pgfplots}
+\pgfplotsset{compat=1.18}
 \usepackage{xcolor}
 
 \definecolor{improvement}{RGB}{34,139,34}
@@ -44,11 +46,10 @@ it should cite from a corpus of 20\,000 articles.
 
 \vspace{0.6em}
 \begin{itemize}
+    \item Not topical similarity --- \emph{citation proximity}:``would paper A cite paper B?''
     \item Each query paper has a title, abstract, body text, and metadata
-    \item Ground truth: actual citation lists from published papers
-    \item Multi-domain: Biology, Medicine, Computer Science, Physics, Chemistry\ldots
-    \item Not topical similarity --- \emph{citation proximity}:
-          ``would paper A cite paper B?''
+    \item Multi-domain corpus: Biology, Medicine, Computer Science, Physics, Chemistry\ldots
+
 \end{itemize}
 
 \vspace{0.6em}
@@ -65,7 +66,7 @@ billion-parameter models are out of scope.
 \textbf{Data}
 \begin{itemize}
     \item \textbf{Corpus}: 20\,000 papers (Parquet)
-    \item \textbf{Public queries}: 100 papers with ground-truth citations
+    \item \textbf{Public queries}: 100 papers with ground-truth citations for local evaluation
     \item \textbf{Held-out queries}: unlabelled, for CodaBench submission
     \item Fields: \texttt{title}, \texttt{abstract}, \texttt{full\_text},
           \texttt{chunk\_meta}, \texttt{domain}
@@ -123,9 +124,31 @@ billion-parameter models are out of scope.
 \end{frame}
 
 % ═══════════════════════════════════════════════════════════════
-% SLIDE 5 — Baseline
+% SLIDE 5 — TF-IDF Baseline
 % ═══════════════════════════════════════════════════════════════
-\begin{frame}{Step 0: Dense Baseline}
+\begin{frame}{Step 0a: TF-IDF Baseline}
+\textbf{Setup.} Classical sparse lexical baseline.\\
+Input: \texttt{title + abstract}, cosine similarity on TF-IDF vectors.
+
+\vspace{0.8em}
+\begin{center}
+\Large NDCG@10 $\approx$ \textbf{0.484}
+\end{center}
+
+\vspace{0.8em}
+\textbf{Observation:}
+\begin{itemize}
+    \item Recall@100 already at 0.75 --- most relevant papers \emph{are} findable
+          by lexical overlap alone
+    \item But NDCG@10 is low: \emph{ranking} quality is the weak link, not recall
+    \item Sets the bar every neural method must clear
+\end{itemize}
+\end{frame}
+
+% ═══════════════════════════════════════════════════════════════
+% SLIDE 6 — Dense Baseline
+% ═══════════════════════════════════════════════════════════════
+\begin{frame}{Step 0b: Dense Baseline}
 \textbf{Setup.} Single dense encoder (BGE-large-en-v1.5).\\
 Input: \texttt{title + abstract}, cosine similarity, no fusion.
 
@@ -145,7 +168,7 @@ Input: \texttt{title + abstract}, cosine similarity, no fusion.
 \end{frame}
 
 % ═══════════════════════════════════════════════════════════════
-% SLIDE 6 — SPECTER2
+% SLIDE 7 — SPECTER2
 % ═══════════════════════════════════════════════════════════════
 \begin{frame}{Improvement 1: SPECTER2 with Proximity Adapter}
 \textbf{Idea.} Replace generic encoder with a \emph{citation-trained} model.
@@ -169,7 +192,7 @@ other should be close'' --- exactly our task.
 \end{frame}
 
 % ═══════════════════════════════════════════════════════════════
-% SLIDE 7 — BM25 + RRF
+% SLIDE 8 — BM25 + RRF
 % ═══════════════════════════════════════════════════════════════
 \begin{frame}{Improvement 2: Hybrid with BM25 (Weighted RRF)}
 \textbf{Problem.} Dense encoders miss exact lexical matches:
@@ -196,7 +219,7 @@ Grid search: $w_{\text{bm25}} \in \{0.3, 0.5, 0.7, 1.0\}$, best = \textbf{0.5}
 \end{frame}
 
 % ═══════════════════════════════════════════════════════════════
-% SLIDE 8 — Body chunks
+% SLIDE 9 — Body chunks
 % ═══════════════════════════════════════════════════════════════
 \begin{frame}{Improvement 3: Body-Chunk Enrichment}
 \textbf{Problem.} \texttt{title + abstract} discards the entire paper body.
@@ -221,7 +244,7 @@ document representation for both SPECTER2 and BM25.
 \end{frame}
 
 % ═══════════════════════════════════════════════════════════════
-% SLIDE 9 — BGE as second dense
+% SLIDE 10 — BGE as second dense
 % ═══════════════════════════════════════════════════════════════
 \begin{frame}{Improvement 4: BGE-large as a Second Dense Retriever}
 \textbf{Idea.} Two dense models that \emph{disagree} are better than two that agree.
@@ -245,7 +268,7 @@ Weights: SPECTER2 = 1.0, BGE = 1.0, BM25 = 0.5
 \end{frame}
 
 % ═══════════════════════════════════════════════════════════════
-% SLIDE 10 — Wider pool
+% SLIDE 11 — Wider pool
 % ═══════════════════════════════════════════════════════════════
 \begin{frame}{Improvement 5: Wider Pool + More Body Chunks}
 Two targeted hyperparameter changes:
@@ -269,7 +292,7 @@ with more body text, BM25 becomes as informative as the dense retrievers.
 \end{frame}
 
 % ═══════════════════════════════════════════════════════════════
-% SLIDE 11 — What didn't work
+% SLIDE 12 — What didn't work
 % ═══════════════════════════════════════════════════════════════
 \begin{frame}{What Did NOT Work (and Why)}
 \begin{columns}[T]
@@ -307,57 +330,52 @@ provides effective diversity.}}
 \end{frame}
 
 % ═══════════════════════════════════════════════════════════════
-% SLIDE 12 — Progression chart
+% SLIDE 13 — Progression chart
 % ═══════════════════════════════════════════════════════════════
 \begin{frame}{NDCG@10 Progression}
 \centering
-\begin{tikzpicture}[xscale=1.8, yscale=10]
-    % Grid
-    \draw[gray!30, thin] (0, 0.50) grid[xstep=1, ystep=0.02] (5, 0.60);
+\begin{tikzpicture}
+\begin{axis}[
+    width=11cm, height=6.2cm,
+    xmin=-0.5, xmax=6.5,
+    ymin=0.462, ymax=0.602,
+    xtick={0,1,2,3,4,5,6},
+    xticklabels={TF-IDF, Dense, SPECTER2, {+BM25}, {+Chunks}, {+BGE}, {+Wider}},
+    xticklabel style={rotate=30, anchor=north east, font=\footnotesize},
+    ytick={0.48,0.50,0.52,0.54,0.56,0.58,0.60},
+    yticklabel style={font=\small},
+    ymajorgrids=true,
+    grid style={gray!30, thin},
+    axis lines=left,
+    tick style={color=black},
+    clip=false,
+]
+    % Main series
+    \addplot[blue!70!black, mark=*, mark size=2.5pt, thick, line width=1.2pt]
+        coordinates {
+            (0, 0.484)
+            (1, 0.500)
+            (2, 0.540)
+            (3, 0.568)
+            (4, 0.577)
+            (5, 0.585)
+            (6, 0.587)
+        };
 
-    % Y axis
-    \draw[thick, -{Stealth}] (-0.1, 0.49) -- (-0.1, 0.61);
-    \foreach \y in {0.50, 0.52, 0.54, 0.56, 0.58, 0.60} {
-        \draw (-0.15, \y) -- (-0.1, \y) node[left=4pt, font=\small] {\y};
-    }
-
-    % X axis labels
-    \foreach \x/\lab in {
-        0/{Baseline},
-        1/{SPECTER2},
-        2/{+BM25},
-        3/{+Chunks},
-        4/{+BGE},
-        5/{+Wider}} {
-        \node[below, font=\footnotesize, rotate=30, anchor=north east] at (\x, 0.49) {\lab};
-    }
-
-    % Data points and lines
-    \coordinate (p0) at (0, 0.500);
-    \coordinate (p1) at (1, 0.540);
-    \coordinate (p2) at (2, 0.568);
-    \coordinate (p3) at (3, 0.577);
-    \coordinate (p4) at (4, 0.585);
-    \coordinate (p5) at (5, 0.587);
-
-    \draw[thick, blue!70!black]
-        (p0) -- (p1) -- (p2) -- (p3) -- (p4) -- (p5);
-
-    \foreach \p in {p0, p1, p2, p3, p4, p5}
-        \fill[blue!70!black] (\p) circle (1.5pt);
-
-    % Annotations
-    \node[above=3pt, font=\scriptsize\bfseries] at (p0) {0.50};
-    \node[above=3pt, font=\scriptsize\bfseries] at (p1) {0.54};
-    \node[above=3pt, font=\scriptsize\bfseries] at (p2) {0.568};
-    \node[above=3pt, font=\scriptsize\bfseries] at (p3) {0.577};
-    \node[above=3pt, font=\scriptsize\bfseries] at (p4) {0.585};
-    \node[above=3pt, font=\scriptsize\bfseries] at (p5) {0.587};
+    % Score labels — alternating above/below to avoid overlap in tight cluster
+    \node[above=5pt, font=\scriptsize\bfseries] at (axis cs:0, 0.484) {0.484};
+    \node[above=5pt, font=\scriptsize\bfseries] at (axis cs:1, 0.500) {0.500};
+    \node[below=5pt, font=\scriptsize\bfseries] at (axis cs:2, 0.540) {0.540};
+    \node[above=5pt, font=\scriptsize\bfseries] at (axis cs:3, 0.568) {0.568};
+    \node[below=5pt, font=\scriptsize\bfseries] at (axis cs:4, 0.577) {0.577};
+    \node[above=5pt, font=\scriptsize\bfseries] at (axis cs:5, 0.585) {0.585};
+    \node[below=5pt, font=\scriptsize\bfseries] at (axis cs:6, 0.587) {0.587};
+\end{axis}
 \end{tikzpicture}
 \end{frame}
 
 % ═══════════════════════════════════════════════════════════════
-% SLIDE 13 — Key Takeaways
+% SLIDE 14 — Key Takeaways
 % ═══════════════════════════════════════════════════════════════
 \begin{frame}{Key Takeaways}
 \begin{enumerate}
@@ -384,7 +402,7 @@ provides effective diversity.}}
 \end{frame}
 
 % ═══════════════════════════════════════════════════════════════
-% SLIDE 14 — Thank you
+% SLIDE 15 — Thank you
 % ═══════════════════════════════════════════════════════════════
 \begin{frame}
 \centering
