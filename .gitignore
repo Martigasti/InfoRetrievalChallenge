@@ -1,5 +1,9 @@
 /data/
 /submissions/
+/cache/
 /.claude/
 /docs/superpowers/
-/cache/
+__pycache__/
+*.pyc
+*:Zone.Identifier
+.ipynb_checkpoints/

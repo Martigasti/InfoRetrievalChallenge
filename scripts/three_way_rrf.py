@@ -1,11 +1,10 @@
 """
-3-way RRF: SPECTER2 + MiniLM + BM25 with RRF k tuning.
+3-way RRF: SPECTER2 + MiniLM + BM25.
 
 Improvements over specter2_minilm_rrf.py:
 - BM25 as third retriever (lexical matching for exact terms)
-- Top-200 per retriever before fusion (more candidates)
-- Grid search over RRF k parameter to optimize NDCG@10
-- BM25 uses NLTK stemming + stopword removal for proper tokenization
+- Top-200 per retriever before fusion
+- BM25 uses NLTK stemming + stopword removal
 """
 
 import json
@@ -23,9 +22,9 @@ from utils import (
     format_text, get_body_chunks, evaluate,
 )
 
-RETRIEVAL_TOP_K = 200  # per retriever, before fusion
+RETRIEVAL_TOP_K = 200
 FINAL_TOP_K = 100
-RRF_K = 10  # best from grid search
+RRF_K = 10
 SPECTER_MODEL = "allenai/specter2_base"
 PROXIMITY_ADAPTER = "allenai/specter2_proximity"
 DENSE_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
@@ -36,10 +35,9 @@ SUBMISSIONS_DIR = ROOT / "submissions"
 HELD_OUT_PATH = ROOT / "held_out_queries.parquet"
 
 
-# ── Text formatting ──────────────────────────────────────────
+# ======================= Text formatting =======================
 
 def format_specter(row):
-    """SPECTER2: 'title [SEP] abstract + first body chunks'."""
     title = str(row.get("title", "") or "").strip()
     abstract = str(row.get("abstract", "") or "").strip()
     body_extra = ""
@@ -56,7 +54,6 @@ def format_specter(row):
 
 
 def format_enriched(row):
-    """MiniLM/BM25: title + abstract + first body chunks."""
     base = format_text(row)
     try:
         chunks = get_body_chunks(row, min_chars=50)
@@ -67,7 +64,7 @@ def format_enriched(row):
     return base
 
 
-# ── Encoding ─────────────────────────────────────────────────
+# ======================= Encoding =======================
 
 def encode_specter(texts, tokenizer, model, batch_size=32, device="cpu"):
     import torch
@@ -84,7 +81,7 @@ def encode_specter(texts, tokenizer, model, batch_size=32, device="cpu"):
     return np.vstack(all_embs).astype(np.float32)
 
 
-# ── Retrieval ────────────────────────────────────────────────
+# ======================= Retrieval =======================
 
 def dense_retrieve(query_embs, q_ids, corpus_embs, c_ids, top_k):
     sim_matrix = query_embs @ corpus_embs.T
@@ -93,7 +90,6 @@ def dense_retrieve(query_embs, q_ids, corpus_embs, c_ids, top_k):
 
 
 def bm25_tokenize(text):
-    """Tokenize with NLTK stemming and stopword removal."""
     from nltk.stem import PorterStemmer
     from nltk.corpus import stopwords
     import re
@@ -114,7 +110,7 @@ def bm25_retrieve(query_texts, q_ids, corpus_tokenized, c_ids, bm25_model, top_k
     return results
 
 
-# ── Fusion ───────────────────────────────────────────────────
+# ======================= Fusion =======================
 
 def rrf_fuse(rankings_list, k=60, top_k=100):
     all_qids = set()
@@ -134,7 +130,7 @@ def rrf_fuse(rankings_list, k=60, top_k=100):
     return fused
 
 
-# ── Main ─────────────────────────────────────────────────────
+# ======================= Main =======================
 
 def main():
     import torch
@@ -144,7 +140,6 @@ def main():
     from sentence_transformers import SentenceTransformer
     from rank_bm25 import BM25Okapi
 
-    # Ensure NLTK data is available
     nltk.download("stopwords", quiet=True)
     nltk.download("punkt", quiet=True)
 
@@ -160,16 +155,15 @@ def main():
     corpus_ids = corpus["doc_id"].tolist()
     query_domains = dict(zip(queries["doc_id"], queries["domain"]))
 
-    # ── Build enriched texts ──
     corpus_enriched = [format_enriched(row) for _, row in corpus.iterrows()]
     corpus_specter = [format_specter(row) for _, row in corpus.iterrows()]
 
-    # ── BM25 index ──
+    # BM25 index
     print("Tokenizing corpus for BM25 (stemmed)...")
     corpus_tokenized = [bm25_tokenize(t) for t in tqdm(corpus_enriched, desc="BM25 tokenizing")]
     bm25 = BM25Okapi(corpus_tokenized)
 
-    # ── SPECTER2 ──
+    # SPECTER2
     print(f"\nLoading {SPECTER_MODEL}...")
     tokenizer = AutoTokenizer.from_pretrained(SPECTER_MODEL)
     specter_model = AutoModel.from_pretrained(SPECTER_MODEL)
@@ -182,16 +176,14 @@ def main():
     specter_corpus_embs = encode_specter(corpus_specter, tokenizer,
                                           specter_model, batch_size=32, device=device)
 
-    # ── MiniLM ──
+    # MiniLM
     minilm_model = SentenceTransformer(DENSE_MODEL_NAME)
     print("Encoding corpus with MiniLM...")
     minilm_corpus_embs = minilm_model.encode(corpus_enriched,
                                               normalize_embeddings=True,
                                               show_progress_bar=True).astype(np.float32)
 
-    # ══════════════════════════════════════════════════════════════
-    # Public queries — evaluate
-    # ══════════════════════════════════════════════════════════════
+    # Evaluation over public queries
     pub_ids = queries["doc_id"].tolist()
     pub_enriched = [format_enriched(row) for _, row in queries.iterrows()]
     pub_specter = [format_specter(row) for _, row in queries.iterrows()]
@@ -221,9 +213,7 @@ def main():
     print(f"\n--- 3-way RRF (k={RRF_K}) ---")
     evaluate(fused_best, qrels, ks=[10, 100], query_domains=query_domains, verbose=True)
 
-    # ══════════════════════════════════════════════════════════════
-    # Held-out queries — predict (using best k)
-    # ══════════════════════════════════════════════════════════════
+    # Evaluation over held-out queries
     ho_ids = held_out["doc_id"].tolist()
     ho_enriched = [format_enriched(row) for _, row in held_out.iterrows()]
     ho_specter_texts = [format_specter(row) for _, row in held_out.iterrows()]

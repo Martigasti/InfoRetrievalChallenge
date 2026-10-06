@@ -71,7 +71,7 @@ def main():
     from sentence_transformers import SentenceTransformer
     model = SentenceTransformer(DENSE_MODEL_NAME)
 
-    # ── Evaluate on public queries ──
+    # Evaluate on public queries
     pub_ids = queries["doc_id"].tolist()
     pub_texts = [format_text(row) for _, row in queries.iterrows()]
     pub_texts_map = dict(zip(pub_ids, pub_texts))
@@ -90,7 +90,7 @@ def main():
     print("\n--- Dense + Cross-Encoder ---")
     evaluate(reranked_sub, qrels, ks=[10, 100], query_domains=query_domains, verbose=True)
 
-    # ── Predict on held-out queries ──
+    # Predict on held-out queries
     ho_ids = held_out["doc_id"].tolist()
     ho_texts = [format_text(row) for _, row in held_out.iterrows()]
     ho_texts_map = dict(zip(ho_ids, ho_texts))

@@ -117,7 +117,7 @@ def main():
     corpus_enriched = [format_enriched(row) for _, row in corpus.iterrows()]
     corpus_specter = [format_specter(row) for _, row in corpus.iterrows()]
 
-    # ── SPECTER2 (shared by both runs) ──
+    # SPECTER2 (shared by both runs)
     print(f"\nLoading {SPECTER_MODEL}...")
     tokenizer = AutoTokenizer.from_pretrained(SPECTER_MODEL)
     specter_model = AutoModel.from_pretrained(SPECTER_MODEL)
@@ -140,7 +140,7 @@ def main():
     specter_ranking = dense_retrieve(specter_q_embs, pub_ids,
                                       specter_corpus_embs, corpus_ids, top_k=RETRIEVAL_TOP_K)
 
-    # ── BGE-large ──
+    # BGE-large
     print(f"\nLoading {BGE_MODEL_NAME}...")
     bge_model = SentenceTransformer(BGE_MODEL_NAME)
     print("Encoding corpus with BGE-large...")
@@ -156,7 +156,7 @@ def main():
     print("\n--- SPECTER2 + BGE-large (2-way RRF) ---")
     evaluate(bge_fused, qrels, ks=[10, 100], query_domains=query_domains, verbose=True)
 
-    # ── Snowflake Arctic ──
+    # Snowflake Arctic
     print(f"\nLoading {ARCTIC_MODEL_NAME}...")
     arctic_model = SentenceTransformer(ARCTIC_MODEL_NAME)
     print("Encoding corpus with Snowflake Arctic...")
@@ -172,7 +172,7 @@ def main():
     print("\n--- SPECTER2 + Snowflake Arctic (2-way RRF) ---")
     evaluate(arctic_fused, qrels, ks=[10, 100], query_domains=query_domains, verbose=True)
 
-    # ── Held-out predictions with Snowflake ──
+    # Held-out predictions with Snowflake
     ho_ids = held_out["doc_id"].tolist()
     ho_enriched = [format_enriched(row) for _, row in held_out.iterrows()]
     ho_specter_texts = [format_specter(row) for _, row in held_out.iterrows()]

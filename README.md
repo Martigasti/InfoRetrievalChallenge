@@ -1,134 +1,98 @@
-# Scientific Paper Citation Recommendation — IR Starter Kit
+# Citation Recommendation with Hybrid Retrieval and Rank Fusion
 
-A retrieval system for recommending scientific paper citations. Given a query paper, the system returns a ranked list of 100 candidate documents from a corpus of 20,000 papers. The primary evaluation metric is **NDCG@10**, with MAP and Recall@100 as complementary metrics.
+Given a scientific paper, retrieve the papers it is most likely to cite from a corpus of 20,000 articles.
+Built for the **CodaBench Scientific Article Retrieval challenge (2025–2026)**, M1 Data Science, Université Paris-Saclay.
 
----
+**Final system:** SPECTER2 (citation-trained) + BGE-large (general semantic) + BM25 (lexical), combined with Weighted Reciprocal Rank Fusion.
+**Result:** NDCG@10 = **0.587** on the public queries, **0.61** on the CodaBench leaderboard (dense baseline: 0.50).
 
-## Task Overview
-
-- **Input**: A query paper (title, abstract, body sections)
-- **Output**: A ranked list of 100 documents from the corpus
-- **Corpus size**: 20,000 scientific papers
-- **Evaluation**: NDCG@10 (primary), MAP, Recall@100
-- **Platform**: CodaBench
+Team: Martin Leiva, Javier Peña Castaño, Raphael Leonardi.
 
 ---
 
-## Best Model: `bge_weighted_rrf.py`
+## Task
 
-The top-performing approach combines three complementary retrievers using **Weighted Reciprocal Rank Fusion (RRF)**. Each retriever captures a different aspect of relevance, and their ranked lists are merged into a single ranking.
+| | |
+|---|---|
+| Input | A query paper (title, abstract, body sections, domain) |
+| Output | Top-100 ranked candidates from a 20k-paper corpus |
+| Primary metric | NDCG@10 (also MAP, Recall@100, MRR@10) |
+| Public queries | 100, with gold citations (noise floor ≈ ±0.005 NDCG@10) |
+| Constraint | 8 GB of VRAM, so large cross-encoders and LLM rerankers are impractical |
 
-### Retrievers
+The key point is that **citation proximity is not the same as topical similarity**: two papers on the same topic may never cite each other, while a paper often cites a methods paper from a different field.
 
-#### 1. SPECTER2 (Domain-Specific Dense Retrieval)
-- **Model**: `allenai/specter2_base` with the `proximity` adapter
-- **Purpose**: Semantic similarity specialized for scientific papers. SPECTER2 is pre-trained on citation graphs — papers that cite each other are pulled closer in embedding space.
-- **Pooling**: CLS token (first token of the output)
-- **Input format**: `"title [SEP] abstract + body_chunks"`
-- **Why it helps**: Captures the high-level scientific topic and domain of the paper better than general-purpose models.
+## Pipeline
 
-#### 2. BGE-large-en-v1.5 (Strong General Dense Retrieval)
-- **Model**: `BAAI/bge-large-en-v1.5`
-- **Purpose**: General-purpose semantic similarity, top-ranked on the MTEB benchmark. Much stronger than smaller models like MiniLM.
-- **Pooling**: Mean pooling with L2 normalization
-- **Input format**: Enriched text — `title + abstract + first 3 body chunks`
-- **Why it helps**: Captures fine-grained semantic similarity across the full text. Complements SPECTER2 by using different training data and architecture.
-
-#### 3. BM25 (Lexical Retrieval)
-- **Algorithm**: BM25Okapi
-- **Purpose**: Exact keyword matching. Retrieves papers that share specific terminology with the query.
-- **Text preprocessing**: NLTK Porter stemming + English stopword removal
-- **Input format**: Same enriched text as BGE
-- **Why it helps**: Dense models can miss papers that share very specific technical terms or named entities. BM25 excels at exact-match retrieval.
-
-### Enriched Text Representation
-
-All retrievers use an enriched representation of each paper that goes beyond just the title and abstract:
-
-```
-title + abstract + first 3 body section chunks (≥50 chars each)
+```text
+                ┌─ SPECTER2 + proximity adapter (CLS, 768d) ─┐
+query paper ────┼─ BGE-large-en-v1.5 (mean pool, 1024d) ─────┼─> Weighted RRF ─> top-100
+                └─ BM25Okapi (Porter stemming, stopwords) ───┘
 ```
 
-This gives retrievers access to the paper's methodology and key content, not just its summary.
+- **Enriched text**: `title + abstract + first N body chunks` (≥50 chars each). Dense models see the first 512 tokens; BM25 indexes the whole text, so it catches method names, datasets and equation references that only appear in the body.
+- **Weighted RRF**: `score(d) = Σ_r w_r / (k + rank_r(d))` with `k = 10`, dense weights fixed at 1.0 and the BM25 weight grid-searched.
+- **Wider pool**: each retriever returns its top 300 before fusion.
 
-### Weighted Reciprocal Rank Fusion
+## Results
 
-RRF merges multiple ranked lists without requiring score normalization. For each document `d`:
+Each step was kept only if it improved NDCG@10 on the public queries. [REPORT.md](REPORT.md) explains the reasoning behind every step.
 
-```
-score(d) = w_specter / (k + rank_specter(d))
-         + w_bge    / (k + rank_bge(d))
-         + w_bm25   / (k + rank_bm25(d))
-```
-
-- **k = 10**: Controls rank sensitivity. Lower k means top-ranked documents are weighted much more heavily.
-- **Dense weights (SPECTER2, BGE) = 1.0**: Fixed.
-- **BM25 weight**: Grid-searched over [0.3, 0.5, 0.7, 1.0] on the public query set to find the optimal balance.
-- Each retriever fetches **top-200 candidates** before fusion, giving RRF a wide pool to rerank from.
-- Final output is the **top-100** documents by fused score.
-
----
-
-## Other Scripts
-
-| Script | Description | Local NDCG@10 |
+| Step | Script | NDCG@10 |
 |---|---|---|
-| `tfidf_baseline.py` | TF-IDF sparse retrieval | ~0.45 |
-| `dense_baseline.py` | MiniLM dense retrieval | ~0.50 |
-| `specter2_retrieval.py` | SPECTER2 only | ~0.51 |
-| `specter2_minilm_rrf.py` | 2-way RRF: SPECTER2 + MiniLM + enriched text | 0.5332 |
-| `three_way_rrf.py` | 3-way RRF: SPECTER2 + MiniLM + BM25, k=10 | 0.5786 |
-| `bge_weighted_rrf.py` | 3-way Weighted RRF: SPECTER2 + BGE-large + BM25 | TBD |
+| TF-IDF baseline | `tfidf_baseline.py` | ~0.45 |
+| Dense baseline (MiniLM / BGE, title + abstract) | `dense_baseline.py` | ~0.50 |
+| SPECTER2 with proximity adapter | `specter2_retrieval.py` | ~0.54 |
+| + BM25, weighted RRF | `three_way_rrf.py` | 0.568 |
+| + body-chunk enrichment | | 0.577 |
+| + BGE-large as second dense retriever | `bge_weighted_rrf.py` | 0.585 (CodaBench 0.60) |
+| + wider pool (top-300) and 6 body chunks | `wider_rrf.py` | **0.587 (CodaBench 0.61)** |
 
-Scripts that did not improve over the dense baseline:
-- `dense_rerank.py` — MiniLM + MS-MARCO cross-encoder reranking (0.43): cross-encoders trained on web queries hurt paper-to-paper similarity.
-- `dense_interpolated_rerank.py` — Score interpolation with cross-encoder (0.50): no gain over pure dense.
-- `scibert_rerank.py` — SciBERT embeddings (0.27): SciBERT is a masked LM, not a sentence encoder.
+### What did not work
 
----
+| Experiment | Script | Takeaway |
+|---|---|---|
+| MS-MARCO cross-encoder reranking | `dense_rerank.py`, `wider_rrf_rerank.py` | Rerankers trained on web queries hurt paper-to-paper ranking (0.43 on the dense baseline) |
+| Jina-embeddings-v3 instead of BGE | `jina_v3_rrf.py` | 0.573: a longer context does not fix a training objective aimed at the wrong task |
+| SciNCL as a 4th retriever | `scincl_4way_rrf.py` | −0.004 (noise): it agrees with SPECTER2, and fusion gains come from *disagreement* |
+| SciBERT embeddings | `scibert_rerank.py` | 0.27: a masked LM, not a sentence encoder |
+
+Also explored: HyDE query expansion with a small LLM (`hyde_weighted_rrf.py`), doc2query-T5 document expansion (`doc2query_*.py`), LightGBM LambdaRank learned fusion (`lightgbm_fusion.py`), GPL unsupervised domain adaptation (`gpl_finetune_rrf.py`), BM25 pseudo-relevance feedback (`bge_bm25_prf.py`), alternative encoders (E5, Snowflake Arctic, Yuan), and a light post-hoc rerank on title overlap and domain match (`light_rerank.py`).
 
 ## Setup
 
 ```bash
-pip install sentence-transformers rank-bm25 nltk adapters
+pip install -r requirements.txt
 python -m nltk.downloader stopwords punkt
 ```
 
-## Running the Best Model
+The challenge data is distributed through CodaBench and is **not included** in this repository. Put it under `data/`:
+
+```text
+data/
+├── corpus.parquet       # 20k papers
+├── queries.parquet      # 100 public queries
+└── qrels.json           # gold citations for the public queries
+```
+
+`held_out_queries.parquet` (the leaderboard queries) is included.
+
+## Usage
 
 ```bash
-python scripts/bge_weighted_rrf.py
+python scripts/wider_rrf.py          # best configuration
+python scripts/bge_weighted_rrf.py   # 3-way weighted RRF
 ```
 
-Output is saved to `submissions/bge_weighted_rrf.json` for CodaBench submission.
+Each script evaluates on the public queries (NDCG@10, MAP, Recall@100), then writes leaderboard predictions to `submissions/`.
 
-## Running the 3-way RRF (previous best)
+## Repository structure
 
-```bash
-python scripts/three_way_rrf.py
-```
-
-Output saved to `submissions/three_way_rrf.json`.
-
----
-
-## Project Structure
-
-```
-starter_kit/
-├── data/
-│   ├── corpus.parquet        # 20k scientific papers
-│   ├── queries.parquet       # Public evaluation queries
-│   └── qrels.json            # Relevance judgements
-├── held_out_queries.parquet  # CodaBench submission queries
-├── scripts/
-│   ├── bge_weighted_rrf.py   # Best model
-│   ├── three_way_rrf.py      # Previous best
-│   ├── specter2_minilm_rrf.py
-│   ├── specter2_retrieval.py
-│   ├── dense_baseline.py
-│   └── tfidf_baseline.py
-├── submissions/              # JSON outputs for CodaBench
-├── utils.py                  # Shared evaluation + data loading utilities
-└── README.md
+```text
+├── scripts/                 # one self-contained script per experiment
+├── utils.py                 # data loading, text formatting, chunking, metrics
+├── notebooks/challenge.ipynb  # data exploration and baselines (course starter notebook)
+├── docs/                    # presentation slides (Beamer) and speaker notes
+├── REPORT.md                # step-by-step progression report
+└── held_out_queries.parquet
 ```

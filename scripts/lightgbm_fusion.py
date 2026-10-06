@@ -1,5 +1,5 @@
 """
-Phase 5: LightGBM LambdaRank learned fusion.
+LightGBM LambdaRank learned fusion.
 
 Uses SPECTER2 + BGE + BM25 as feature sources — same models as bge_weighted_rrf.py,
 no new encoders. Instead of averaging ranks (RRF), we train LightGBM with the
@@ -73,8 +73,7 @@ SUBMISSIONS_DIR = ROOT / "submissions"
 HELD_OUT_PATH = ROOT / "held_out_queries.parquet"
 
 
-# ── Text formatting ──────────────────────────────────────────
-
+# ======================= Text formatting =======================
 def format_specter(row):
     title = str(row.get("title", "") or "").strip()
     abstract = str(row.get("abstract", "") or "").strip()
@@ -102,8 +101,7 @@ def format_enriched(row):
     return base
 
 
-# ── Encoding ─────────────────────────────────────────────────
-
+# ======================= Encoding =======================
 def encode_specter(texts, tokenizer, model, batch_size=32, device="cpu"):
     import torch
     all_embs = []
@@ -119,8 +117,7 @@ def encode_specter(texts, tokenizer, model, batch_size=32, device="cpu"):
     return np.vstack(all_embs).astype(np.float32)
 
 
-# ── Retrieval with scores ────────────────────────────────────
-
+# ======================= Retrieval with scores =======================
 def dense_retrieve_scored(query_embs, q_ids, corpus_embs, c_ids, top_k):
     """Returns dict: qid -> list of (doc_id, score, rank) sorted by rank."""
     sim_matrix = query_embs @ corpus_embs.T
@@ -158,8 +155,7 @@ def bm25_retrieve_scored(query_texts, q_ids, corpus_tokenized, c_ids, bm25_model
     return result
 
 
-# ── Feature construction ─────────────────────────────────────
-
+# ======================= Feature construction =======================
 def build_query_features(qid, specter_res, bge_res, bm25_res, relevant_set=None):
     """
     Build feature matrix and labels for a single query.
@@ -200,8 +196,7 @@ def build_query_features(qid, specter_res, bge_res, bm25_res, relevant_set=None)
     return np.array(rows, dtype=np.float32), np.array(labels, dtype=np.int32), doc_ids
 
 
-# ── NDCG@10 helper ───────────────────────────────────────────
-
+# ======================= NDCG@10 helper =======================
 def ndcg10(pred_scores, true_labels):
     """Arrays of scores and 0/1 labels for one query."""
     order = np.argsort(-pred_scores)
@@ -212,8 +207,7 @@ def ndcg10(pred_scores, true_labels):
     return dcg / idcg if idcg > 0 else 0.0
 
 
-# ── Weighted RRF fallback ────────────────────────────────────
-
+# ======================= Weighted RRF fallback =======================
 def weighted_rrf_fuse(rankings_with_weights, k=10, top_k=100):
     all_qids = set()
     for ranking, _ in rankings_with_weights:
@@ -234,8 +228,7 @@ def scored_to_ranking(scored_res):
     return {qid: [d for d, _, _ in entries] for qid, entries in scored_res.items()}
 
 
-# ── Main ─────────────────────────────────────────────────────
-
+# ======================= Main =======================
 def main():
     import torch
     import nltk
@@ -265,12 +258,12 @@ def main():
     corpus_enriched = [format_enriched(row) for _, row in corpus.iterrows()]
     corpus_specter  = [format_specter(row)  for _, row in corpus.iterrows()]
 
-    # ── BM25 index ──
+    # BM25 index
     print("Tokenizing corpus for BM25...")
     corpus_tokenized = [bm25_tokenize(t) for t in tqdm(corpus_enriched, desc="BM25 tokenizing")]
     bm25 = BM25Okapi(corpus_tokenized)
 
-    # ── SPECTER2 ──
+    # SPECTER2
     print(f"\nLoading {SPECTER_MODEL}...")
     tokenizer = AutoTokenizer.from_pretrained(SPECTER_MODEL)
     specter_model = AutoModel.from_pretrained(SPECTER_MODEL)
@@ -282,16 +275,13 @@ def main():
     specter_corpus_embs = encode_specter(corpus_specter, tokenizer,
                                           specter_model, batch_size=32, device=device)
 
-    # ── BGE-large ──
+    # BGE-large
     print(f"\nLoading {BGE_MODEL_NAME}...")
     bge_model = SentenceTransformer(BGE_MODEL_NAME, device=device)
     print("Encoding corpus with BGE-large...")
     bge_corpus_embs = bge_model.encode(corpus_enriched, normalize_embeddings=True,
                                         show_progress_bar=True).astype(np.float32)
-
-    # ══════════════════════════════════════════════════════════════
     # Public queries — retrieve with scores
-    # ══════════════════════════════════════════════════════════════
     pub_ids      = queries["doc_id"].tolist()
     pub_enriched = [format_enriched(row) for _, row in queries.iterrows()]
     pub_specter  = [format_specter(row)  for _, row in queries.iterrows()]
@@ -312,7 +302,7 @@ def main():
     bm25_pub = bm25_retrieve_scored(pub_enriched, pub_ids, corpus_tokenized,
                                      corpus_ids, bm25, top_k=RETRIEVAL_TOP_K)
 
-    # ── Build per-query feature data ──
+    # Build per-query feature data
     print("\nBuilding feature matrix...")
     query_data = {}   # qid -> (X, y, doc_ids)
     for qid in pub_ids:
@@ -327,7 +317,7 @@ def main():
     print(f"  {total_cands} total candidates across {len(pub_ids)} queries "
           f"({total_rel} relevant, {total_cands - total_rel} non-relevant)")
 
-    # ── 5-fold GroupKFold CV ──
+    # 5-fold GroupKFold CV
     print(f"\n{'='*55}")
     print(f"{N_CV_FOLDS}-fold GroupKFold CV (LambdaRank, ndcg@10)")
     print(f"{'='*55}")
@@ -386,7 +376,7 @@ def main():
     use_lgbm = cv_mean > RRF_BASELINE_NDCG10
     print(f"Use LightGBM? {'YES' if use_lgbm else 'NO — falling back to weighted RRF'}")
 
-    # ── Full-data evaluation (public) ──
+    # Full-data evaluation (public)
     print("\nTraining on all 100 public queries for evaluation + held-out inference...")
     g_all = [len(query_data[q][2]) for q in pub_ids]
     full_ds = lgb.Dataset(X_all, label=y_all, group=g_all)
@@ -433,10 +423,7 @@ def main():
         print("\n--- Full evaluation: Weighted RRF (fallback) ---")
         evaluate(rrf_ranking_pub, qrels, ks=[10, 100],
                  query_domains=query_domains, verbose=True)
-
-    # ══════════════════════════════════════════════════════════════
     # Held-out queries — retrieve + predict
-    # ══════════════════════════════════════════════════════════════
     ho_ids      = held_out["doc_id"].tolist()
     ho_enriched = [format_enriched(row) for _, row in held_out.iterrows()]
     ho_specter  = [format_specter(row)  for _, row in held_out.iterrows()]

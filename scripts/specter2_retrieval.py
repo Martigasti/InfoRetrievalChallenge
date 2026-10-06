@@ -1,10 +1,9 @@
 """
 SPECTER2 dense retrieval for scientific paper citation recommendation.
 
-SPECTER2 (allenai/specter2) is trained specifically for scientific paper
-similarity, unlike general-purpose sentence transformers.
-
-Input format: "title [SEP] abstract" as recommended by the model authors.
+- Citation-trained model: papers that cite each other are close in embedding space
+- Proximity adapter: tuned for document-to-document similarity
+- Input format: "title [SEP] abstract"
 """
 
 import json
@@ -29,7 +28,6 @@ HELD_OUT_PATH = ROOT / "held_out_queries.parquet"
 
 
 def format_specter(row):
-    """SPECTER2 expects 'title [SEP] abstract'."""
     title = str(row.get("title", "") or "").strip()
     abstract = str(row.get("abstract", "") or "").strip()
     if title and abstract:
@@ -38,18 +36,15 @@ def format_specter(row):
 
 
 def encode_specter(texts, tokenizer, model, batch_size=32, device="cpu"):
-    """Encode texts with SPECTER2 using CLS pooling."""
     import torch
     all_embs = []
-    for i in tqdm(range(0, len(texts), batch_size), desc="Encoding"):
+    for i in tqdm(range(0, len(texts), batch_size), desc="SPECTER2 encoding"):
         batch = texts[i:i + batch_size]
         encoded = tokenizer(batch, padding=True, truncation=True,
                             max_length=512, return_tensors="pt").to(device)
         with torch.no_grad():
             output = model(**encoded)
-        # SPECTER2 uses CLS token embedding
         emb = output.last_hidden_state[:, 0, :]
-        # L2 normalize for cosine similarity via dot product
         emb = emb / emb.norm(dim=1, keepdim=True)
         all_embs.append(emb.cpu().numpy())
     return np.vstack(all_embs).astype(np.float32)
@@ -78,7 +73,7 @@ def main():
     corpus_ids = corpus["doc_id"].tolist()
     corpus_texts = [format_specter(row) for _, row in corpus.iterrows()]
 
-    # Load SPECTER2 with proximity adapter
+    # SPECTER2
     print(f"Loading {SPECTER_MODEL} + proximity adapter...")
     tokenizer = AutoTokenizer.from_pretrained(SPECTER_MODEL)
     model = AutoModel.from_pretrained(SPECTER_MODEL)
@@ -93,7 +88,7 @@ def main():
     corpus_embs = encode_specter(corpus_texts, tokenizer, model,
                                   batch_size=32, device=device)
 
-    # ── Evaluate on public queries ──
+    # Evaluation over public queries
     pub_ids = queries["doc_id"].tolist()
     pub_texts = [format_specter(row) for _, row in queries.iterrows()]
     query_domains = dict(zip(queries["doc_id"], queries["domain"]))
@@ -106,7 +101,7 @@ def main():
     print("\n--- SPECTER2 ---")
     evaluate(submission, qrels, ks=[10, 100], query_domains=query_domains, verbose=True)
 
-    # ── Predict on held-out queries ──
+    # Evaluation over held-out queries
     ho_ids = held_out["doc_id"].tolist()
     ho_texts = [format_specter(row) for _, row in held_out.iterrows()]
 

@@ -38,7 +38,7 @@ SUBMISSIONS_DIR = ROOT / "submissions"
 HELD_OUT_PATH = ROOT / "held_out_queries.parquet"
 
 
-# ── Text formatting ──────────────────────────────────────────
+# ======================= Text formatting =======================
 
 def format_specter(row):
     title = str(row.get("title", "") or "").strip()
@@ -67,7 +67,7 @@ def format_enriched(row):
     return base
 
 
-# ── Encoding ─────────────────────────────────────────────────
+# ======================= Encoding =======================
 
 def encode_specter(texts, tokenizer, model, batch_size=32, device="cpu"):
     import torch
@@ -84,7 +84,7 @@ def encode_specter(texts, tokenizer, model, batch_size=32, device="cpu"):
     return np.vstack(all_embs).astype(np.float32)
 
 
-# ── Retrieval ────────────────────────────────────────────────
+# ======================= Retrieval =======================
 
 def dense_retrieve(query_embs, q_ids, corpus_embs, c_ids, top_k):
     sim_matrix = query_embs @ corpus_embs.T
@@ -112,7 +112,7 @@ def bm25_retrieve(query_texts, q_ids, corpus_tokenized, c_ids, bm25_model, top_k
     return results
 
 
-# ── Weighted RRF ─────────────────────────────────────────────
+# ======================= Weighted RRF =======================
 
 def weighted_rrf_fuse(rankings_with_weights, k=10, top_k=100):
     all_qids = set()
@@ -130,7 +130,7 @@ def weighted_rrf_fuse(rankings_with_weights, k=10, top_k=100):
     return fused
 
 
-# ── Main ─────────────────────────────────────────────────────
+# ======================= Main =======================
 
 def main():
     import torch
@@ -159,12 +159,12 @@ def main():
     corpus_enriched = [format_enriched(row) for _, row in corpus.iterrows()]
     corpus_specter  = [format_specter(row)  for _, row in corpus.iterrows()]
 
-    # ── BM25 index ──
+    # BM25 index
     print("Tokenizing corpus for BM25...")
     corpus_tokenized = [bm25_tokenize(t) for t in tqdm(corpus_enriched, desc="BM25 tokenizing")]
     bm25 = BM25Okapi(corpus_tokenized)
 
-    # ── SPECTER2 ──
+    # SPECTER2
     print(f"\nLoading {SPECTER_MODEL}...")
     tokenizer = AutoTokenizer.from_pretrained(SPECTER_MODEL)
     specter_model = AutoModel.from_pretrained(SPECTER_MODEL)
@@ -176,16 +176,14 @@ def main():
     specter_corpus_embs = encode_specter(corpus_specter, tokenizer,
                                           specter_model, batch_size=32, device=device)
 
-    # ── BGE-large ──
+    # BGE-large
     print(f"\nLoading {BGE_MODEL_NAME}...")
     bge_model = SentenceTransformer(BGE_MODEL_NAME)
     print("Encoding corpus with BGE-large...")
     bge_corpus_embs = bge_model.encode(corpus_enriched, normalize_embeddings=True,
                                         show_progress_bar=True).astype(np.float32)
 
-    # ══════════════════════════════════════════════════════════════
-    # Public queries — evaluate
-    # ══════════════════════════════════════════════════════════════
+    # Evaluation over public queries
     pub_ids      = queries["doc_id"].tolist()
     pub_enriched = [format_enriched(row) for _, row in queries.iterrows()]
     pub_specter  = [format_specter(row)  for _, row in queries.iterrows()]
@@ -235,9 +233,7 @@ def main():
     print(f"\n--- Wider RRF (pool={RETRIEVAL_TOP_K}, chunks={BODY_CHUNKS}, bm25={best_cfg}) ---")
     evaluate(fused_best, qrels, ks=[10, 100], query_domains=query_domains, verbose=True)
 
-    # ══════════════════════════════════════════════════════════════
-    # Held-out queries — predict
-    # ══════════════════════════════════════════════════════════════
+    # Evaluation over held-out queries
     ho_ids      = held_out["doc_id"].tolist()
     ho_enriched = [format_enriched(row) for _, row in held_out.iterrows()]
     ho_specter  = [format_specter(row)  for _, row in held_out.iterrows()]

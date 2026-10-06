@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 
 
-# ── Data loaders ─────────────────────────────────────────────
+# ======================= Data loaders =======================
 
 def load_queries(path) -> pd.DataFrame:
     return pd.read_parquet(path)
@@ -29,7 +29,7 @@ def load_embeddings(emb_path, ids_path):
     return embeddings, ids
 
 
-# ── Text formatting ──────────────────────────────────────────
+# ======================= Text formatting =======================
 
 def format_text(row) -> str:
     title = str(row.get("title", "") or "").strip()
@@ -39,7 +39,7 @@ def format_text(row) -> str:
     return title or abstract
 
 
-# ── Chunk extraction ─────────────────────────────────────────
+# ======================= Chunk extraction =======================
 
 def get_chunks(full_text: str, chunk_meta_json) -> list:
     meta = json.loads(chunk_meta_json) if isinstance(chunk_meta_json, str) else chunk_meta_json
@@ -66,7 +66,7 @@ def get_body_chunks(row, min_chars: int = 100) -> list:
             if c["type"] == "body" and len(c["text"]) >= min_chars]
 
 
-# ── Metric functions (per-query) ─────────────────────────────
+# ======================= Metric functions (per-query) =======================
 
 def recall_at_k(ranked: list, relevant: set, k: int) -> float:
     if not relevant:
@@ -111,7 +111,7 @@ def average_precision(ranked: list, relevant: set) -> float:
     return score / len(relevant)
 
 
-# ── Aggregate evaluation ─────────────────────────────────────
+# ======================= Aggregate evaluation =======================
 
 def evaluate(submission, qrels, ks=None, query_domains=None, verbose=True):
     if ks is None:

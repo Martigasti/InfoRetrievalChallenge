@@ -55,7 +55,7 @@ HYDE_PROMPT = (
 )
 
 
-# ── HyDE generation ──────────────────────────────────────────
+# ======================= HyDE generation =======================
 
 def build_prompt(row):
     title    = str(row.get("title", "") or "").strip()
@@ -135,7 +135,7 @@ def generate_hypotheticals(query_df, device):
     return hypotheticals
 
 
-# ── Text formatting ──────────────────────────────────────────
+# ======================= Text formatting =======================
 
 def format_specter(row):
     title = str(row.get("title", "") or "").strip()
@@ -169,7 +169,7 @@ def format_hyde_specter(hyp_text):
     return "[SEP] " + hyp_text if hyp_text else ""
 
 
-# ── Encoding ─────────────────────────────────────────────────
+# ======================= Encoding =======================
 
 def encode_specter(texts, tokenizer, model, batch_size=32, device="cpu"):
     import torch
@@ -186,7 +186,7 @@ def encode_specter(texts, tokenizer, model, batch_size=32, device="cpu"):
     return np.vstack(all_embs).astype(np.float32)
 
 
-# ── Retrieval ────────────────────────────────────────────────
+# ======================= Retrieval =======================
 
 def dense_retrieve(query_embs, q_ids, corpus_embs, c_ids, top_k):
     sim_matrix = query_embs @ corpus_embs.T
@@ -214,7 +214,7 @@ def bm25_retrieve(query_texts, q_ids, corpus_tokenized, c_ids, bm25_model, top_k
     return results
 
 
-# ── Weighted RRF ─────────────────────────────────────────────
+# ======================= Weighted RRF =======================
 
 def weighted_rrf_fuse(rankings_with_weights, k=10, top_k=100):
     all_qids = set()
@@ -232,7 +232,7 @@ def weighted_rrf_fuse(rankings_with_weights, k=10, top_k=100):
     return fused
 
 
-# ── Main ─────────────────────────────────────────────────────
+# ======================= Main =======================
 
 def main():
     import torch
@@ -257,22 +257,22 @@ def main():
     corpus_ids    = corpus["doc_id"].tolist()
     query_domains = dict(zip(queries["doc_id"], queries["domain"]))
 
-    # ── HyDE: generate hypotheticals for public + held-out queries ──
+    # HyDE: generate hypotheticals for public + held-out queries
     # Run T5 first, then free GPU before loading dense models.
     import pandas as pd
     all_queries = pd.concat([queries, held_out], ignore_index=True)
     hypotheticals = generate_hypotheticals(all_queries, device)
 
-    # ── Corpus text (unchanged from bge_weighted_rrf) ──
+    # Corpus text (unchanged from bge_weighted_rrf)
     corpus_enriched = [format_enriched(row) for _, row in corpus.iterrows()]
     corpus_specter  = [format_specter(row)  for _, row in corpus.iterrows()]
 
-    # ── BM25 index (unchanged — original text, no HyDE) ──
+    # BM25 index (unchanged — original text, no HyDE)
     print("\nTokenizing corpus for BM25...")
     corpus_tokenized = [bm25_tokenize(t) for t in tqdm(corpus_enriched, desc="BM25 tokenizing")]
     bm25 = BM25Okapi(corpus_tokenized)
 
-    # ── SPECTER2 ──
+    # SPECTER2
     print(f"\nLoading {SPECTER_MODEL}...")
     tokenizer = AutoTokenizer.from_pretrained(SPECTER_MODEL)
     specter_model = AutoModel.from_pretrained(SPECTER_MODEL)
@@ -284,16 +284,14 @@ def main():
     specter_corpus_embs = encode_specter(corpus_specter, tokenizer,
                                           specter_model, batch_size=32, device=device)
 
-    # ── BGE-large ──
+    # BGE-large
     print(f"\nLoading {BGE_MODEL_NAME}...")
     bge_model = SentenceTransformer(BGE_MODEL_NAME)
     print("Encoding corpus with BGE-large...")
     bge_corpus_embs = bge_model.encode(corpus_enriched, normalize_embeddings=True,
                                         show_progress_bar=True).astype(np.float32)
 
-    # ══════════════════════════════════════════════════════════════
-    # Public queries — encode hypotheticals, retrieve, evaluate
-    # ══════════════════════════════════════════════════════════════
+    # Evaluation over public queries
     pub_ids = queries["doc_id"].tolist()
     pub_enriched = [format_enriched(row) for _, row in queries.iterrows()]
 
@@ -347,9 +345,7 @@ def main():
     print(f"\n--- HyDE + Weighted RRF (specter=1.0, bge=1.0, bm25={best_cfg}) ---")
     evaluate(fused_best, qrels, ks=[10, 100], query_domains=query_domains, verbose=True)
 
-    # ══════════════════════════════════════════════════════════════
-    # Held-out queries — retrieve + predict
-    # ══════════════════════════════════════════════════════════════
+    # Evaluation over held-out queries
     ho_ids      = held_out["doc_id"].tolist()
     ho_enriched = [format_enriched(row) for _, row in held_out.iterrows()]
 

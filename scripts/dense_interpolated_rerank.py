@@ -102,7 +102,7 @@ def main():
 
     query_domains = dict(zip(queries["doc_id"], queries["domain"]))
 
-    # ── Public queries: evaluate ──
+    # Public queries: evaluate
     pub_texts_map = {row["doc_id"]: format_text(row) for _, row in queries.iterrows()}
 
     # Dense-only baseline for comparison
@@ -136,7 +136,7 @@ def main():
     print(f"\n--- Dense + CE (alpha={best_alpha}) ---")
     evaluate(reranked, qrels, ks=[10, 100], query_domains=query_domains, verbose=True)
 
-    # ── Held-out queries: predict ──
+    # Held-out queries: predict
     print(f"\nEncoding held-out queries...")
     model = SentenceTransformer(DENSE_MODEL_NAME)
     ho_texts = [format_text(row) for _, row in held_out.iterrows()]

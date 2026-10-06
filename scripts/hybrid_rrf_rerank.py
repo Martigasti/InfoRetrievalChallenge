@@ -36,8 +36,7 @@ SUBMISSIONS_DIR = ROOT / "submissions"
 HELD_OUT_PATH = ROOT / "held_out_queries.parquet"
 
 
-# ── Helpers ──────────────────────────────────────────────────
-
+# ======================= Helpers =======================
 def rrf_fuse(ranked_lists: list[dict[str, list[str]]], k: int = 60, top_n: int = 100) -> dict[str, list[str]]:
     """
     Reciprocal Rank Fusion over multiple ranked lists.
@@ -100,8 +99,7 @@ def cross_encoder_rerank(submission, query_texts_map, corpus_texts_map, top_n=10
     return reranked
 
 
-# ── Main ─────────────────────────────────────────────────────
-
+# ======================= Main =======================
 def run_pipeline(queries_df, query_ids, query_texts, corpus, corpus_ids, corpus_texts,
                  corpus_embs, c_ids, dense_model_name, label=""):
     """Run the full hybrid pipeline on a set of queries."""
@@ -148,7 +146,7 @@ def main():
     corpus_embs, c_ids = load_embeddings(EMB_DIR / "corpus_embeddings.npy",
                                           EMB_DIR / "corpus_ids.json")
 
-    # ── Evaluate on public queries ──
+    # Evaluate on public queries
     pub_ids = queries["doc_id"].tolist()
     pub_texts = [format_text(row) for _, row in queries.iterrows()]
     query_domains = dict(zip(queries["doc_id"], queries["domain"]))
@@ -167,7 +165,7 @@ def main():
     print("\n--- RRF + Cross-Encoder ---")
     evaluate(final_sub, qrels, ks=[10, 100], query_domains=query_domains, verbose=True)
 
-    # ── Predict on held-out queries ──
+    # Predict on held-out queries
     ho_ids = held_out["doc_id"].tolist()
     ho_texts = [format_text(row) for _, row in held_out.iterrows()]
 

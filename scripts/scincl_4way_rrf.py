@@ -1,18 +1,8 @@
 """
 4-way Weighted RRF: SPECTER2 + BGE-large + SciNCL + BM25.
 
-Phase 3 of the overnight plan. SciNCL (malteos/scincl) is specifically trained
-on scientific citation graphs — unlike Jina/Arctic, it targets exactly the task
-at hand (paper-to-paper citation similarity).
-
-Strategy: add SciNCL as a *fourth* retriever (not replacing BGE), because each
-dense model captures different patterns and BGE is our proven backbone.
-
-Grid search: w_scincl ∈ {0.5, 1.0, 1.5}, with specter=bge=1.0 and bm25=0.5
-(the BM25 weight locked from bge_weighted_rrf.py).
-
-SciNCL is SciBERT-based (~110M params), so no GPU swap needed — it coexists
-with SPECTER2 and BGE on 8GB VRAM.
+- SciNCL adds a second citation-trained retriever alongside SPECTER2
+- Grid search over w_scincl with specter=bge=1.0, bm25=0.5 fixed
 """
 
 import json
@@ -35,7 +25,7 @@ RETRIEVAL_TOP_K = 200
 FINAL_TOP_K = 100
 RRF_K = 10
 BODY_CHUNKS = 6
-BM25_WEIGHT = 0.5  # locked from bge_weighted_rrf.py
+BM25_WEIGHT = 0.5
 
 SPECTER_MODEL = "allenai/specter2_base"
 PROXIMITY_ADAPTER = "allenai/specter2_proximity"
@@ -50,7 +40,7 @@ SUBMISSIONS_DIR = ROOT / "submissions"
 HELD_OUT_PATH = ROOT / "held_out_queries.parquet"
 
 
-# ── Text formatting ──────────────────────────────────────────
+# ======================= Text formatting =======================
 
 def format_specter(row):
     title = str(row.get("title", "") or "").strip()
@@ -80,7 +70,6 @@ def format_enriched(row):
 
 
 def format_scincl(row):
-    """SciNCL canonical input: title [SEP] abstract (no body chunks)."""
     title = str(row.get("title", "") or "").strip()
     abstract = str(row.get("abstract", "") or "").strip()
     if title and abstract:
@@ -88,7 +77,7 @@ def format_scincl(row):
     return title or abstract
 
 
-# ── Encoding ─────────────────────────────────────────────────
+# ======================= Encoding =======================
 
 def encode_specter(texts, tokenizer, model, batch_size=32, device="cpu"):
     import torch
@@ -106,7 +95,6 @@ def encode_specter(texts, tokenizer, model, batch_size=32, device="cpu"):
 
 
 def encode_scincl(texts, tokenizer, model, batch_size=32, device="cpu"):
-    """SciNCL: CLS pooling + L2 normalize (same pattern as SPECTER2)."""
     import torch
     all_embs = []
     for i in tqdm(range(0, len(texts), batch_size), desc="SciNCL encoding"):
@@ -123,7 +111,7 @@ def encode_scincl(texts, tokenizer, model, batch_size=32, device="cpu"):
     return np.vstack(all_embs).astype(np.float32)
 
 
-# ── Retrieval ────────────────────────────────────────────────
+# ======================= Retrieval =======================
 
 def dense_retrieve(query_embs, q_ids, corpus_embs, c_ids, top_k):
     sim_matrix = query_embs @ corpus_embs.T
@@ -151,7 +139,7 @@ def bm25_retrieve(query_texts, q_ids, corpus_tokenized, c_ids, bm25_model, top_k
     return results
 
 
-# ── Weighted RRF ─────────────────────────────────────────────
+# ======================= Weighted RRF =======================
 
 def weighted_rrf_fuse(rankings_with_weights, k=10, top_k=100):
     """score(d) = sum_r weight_r / (k + rank_r(d))"""
@@ -172,7 +160,7 @@ def weighted_rrf_fuse(rankings_with_weights, k=10, top_k=100):
     return fused
 
 
-# ── Main ─────────────────────────────────────────────────────
+# ======================= Main =======================
 
 def main():
     import torch
@@ -202,12 +190,12 @@ def main():
     corpus_specter = [format_specter(row) for _, row in corpus.iterrows()]
     corpus_scincl = [format_scincl(row) for _, row in corpus.iterrows()]
 
-    # ── BM25 index ──
+    # BM25 index
     print("Tokenizing corpus for BM25 (stemmed)...")
     corpus_tokenized = [bm25_tokenize(t) for t in tqdm(corpus_enriched, desc="BM25 tokenizing")]
     bm25 = BM25Okapi(corpus_tokenized)
 
-    # ── SPECTER2 ──
+    # SPECTER2
     print(f"\nLoading {SPECTER_MODEL}...")
     specter_tokenizer = AutoTokenizer.from_pretrained(SPECTER_MODEL)
     specter_model = AutoModel.from_pretrained(SPECTER_MODEL)
@@ -220,7 +208,7 @@ def main():
     specter_corpus_embs = encode_specter(corpus_specter, specter_tokenizer,
                                           specter_model, batch_size=32, device=device)
 
-    # ── BGE-large ──
+    # BGE-large
     print(f"\nLoading {BGE_MODEL_NAME}...")
     bge_model = SentenceTransformer(BGE_MODEL_NAME, device=device)
     print("Encoding corpus with BGE-large...")
@@ -228,7 +216,7 @@ def main():
                                         normalize_embeddings=True,
                                         show_progress_bar=True).astype(np.float32)
 
-    # ── SciNCL ──
+    # SciNCL
     print(f"\nLoading {SCINCL_MODEL}...")
     scincl_tokenizer = AutoTokenizer.from_pretrained(SCINCL_MODEL)
     scincl_model = AutoModel.from_pretrained(SCINCL_MODEL).to(device).eval()
@@ -237,9 +225,8 @@ def main():
     scincl_corpus_embs = encode_scincl(corpus_scincl, scincl_tokenizer,
                                         scincl_model, batch_size=32, device=device)
 
-    # ══════════════════════════════════════════════════════════════
-    # Public queries — evaluate
-    # ══════════════════════════════════════════════════════════════
+    # Evaluation on public queries
+
     pub_ids = queries["doc_id"].tolist()
     pub_enriched = [format_enriched(row) for _, row in queries.iterrows()]
     pub_specter = [format_specter(row) for _, row in queries.iterrows()]
@@ -267,7 +254,7 @@ def main():
     bm25_ranking = bm25_retrieve(pub_enriched, pub_ids, corpus_tokenized,
                                   corpus_ids, bm25, top_k=RETRIEVAL_TOP_K)
 
-    # ── Baseline: 3-way (BGE + SPECTER2 + BM25) for direct delta ──
+    # Baseline: 3-way (BGE + SPECTER2 + BM25) for direct delta 
     print("\n--- 3-way baseline (SPECTER2 + BGE + BM25), no SciNCL ---")
     fused_baseline = weighted_rrf_fuse(
         [(specter_ranking, 1.0), (bge_ranking, 1.0), (bm25_ranking, BM25_WEIGHT)],
@@ -280,7 +267,7 @@ def main():
           f"MAP={res['overall']['MAP']:.4f}  "
           f"Recall@100={res['overall']['Recall@100']:.4f}")
 
-    # ── Grid search over w_scincl ──
+    # Grid search over w_scincl
     print("\n" + "=" * 50)
     print("Grid search: SciNCL weight (specter=bge=1.0, bm25=0.5)")
     print("=" * 50)
@@ -323,9 +310,8 @@ def main():
           f"(specter=1.0, bge=1.0, scincl={best_w}, bm25={BM25_WEIGHT}) ---")
     evaluate(fused_best, qrels, ks=[10, 100], query_domains=query_domains, verbose=True)
 
-    # ══════════════════════════════════════════════════════════════
-    # Held-out queries — predict
-    # ══════════════════════════════════════════════════════════════
+    # Evaluation on held-out queries
+    
     ho_ids = held_out["doc_id"].tolist()
     ho_enriched = [format_enriched(row) for _, row in held_out.iterrows()]
     ho_specter_texts = [format_specter(row) for _, row in held_out.iterrows()]

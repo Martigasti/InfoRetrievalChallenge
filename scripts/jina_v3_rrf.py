@@ -2,11 +2,7 @@
 3-way Weighted RRF: SPECTER2 + Jina-embeddings-v3 + BM25.
 
 Based on bge_weighted_rrf.py, replacing BGE-large with jinaai/jina-embeddings-v3:
-- 570M params, fp16, max_length=2048 (4× the context of BGE's 512)
-- Uses task='retrieval.passage' for both corpus and queries (symmetric task)
-- trust_remote_code=True (custom Jina encode method)
-- batch_size=4 to stay within 8GB VRAM at 2048 token context
-- GPU-swapped with SPECTER2 to share 8GB VRAM
+- 570M params, fp16, max_length=2048 (4 times the context of BGE's 512)
 """
 
 import json
@@ -33,8 +29,8 @@ SPECTER_MODEL = "allenai/specter2_base"
 PROXIMITY_ADAPTER = "allenai/specter2_proximity"
 JINA_MODEL = "jinaai/jina-embeddings-v3"
 JINA_MAX_LEN = 2048
-JINA_TASK = "retrieval.passage"   # symmetric — same task for corpus and queries
-JINA_BATCH_SIZE = 4               # 2048 tokens × 570M fp16 params on 8GB VRAM
+JINA_TASK = "retrieval.passage"   # symmetric, same task for corpus and queries
+JINA_BATCH_SIZE = 4               # 2048 tokens × 570M fp16 params
 
 ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = ROOT / "data"
@@ -42,7 +38,7 @@ SUBMISSIONS_DIR = ROOT / "submissions"
 HELD_OUT_PATH = ROOT / "held_out_queries.parquet"
 
 
-# ── Text formatting ──────────────────────────────────────────
+# ======================= Text formatting =======================
 
 def format_specter(row):
     title = str(row.get("title", "") or "").strip()
@@ -71,7 +67,7 @@ def format_enriched(row):
     return base
 
 
-# ── Encoding ─────────────────────────────────────────────────
+# ======================= Encoding =======================
 
 def encode_specter(texts, tokenizer, model, batch_size=32, device="cpu"):
     import torch
@@ -107,7 +103,7 @@ def encode_jina(texts, model, batch_size=JINA_BATCH_SIZE):
     return np.vstack(all_embs)
 
 
-# ── Retrieval ────────────────────────────────────────────────
+# ======================= Retrieval =======================
 
 def dense_retrieve(query_embs, q_ids, corpus_embs, c_ids, top_k):
     sim_matrix = query_embs @ corpus_embs.T
@@ -135,7 +131,7 @@ def bm25_retrieve(query_texts, q_ids, corpus_tokenized, c_ids, bm25_model, top_k
     return results
 
 
-# ── Weighted RRF ─────────────────────────────────────────────
+# ======================= Weighted RRF =======================
 
 def weighted_rrf_fuse(rankings_with_weights, k=10, top_k=100):
     """score(d) = sum_r weight_r / (k + rank_r(d))"""
@@ -156,7 +152,7 @@ def weighted_rrf_fuse(rankings_with_weights, k=10, top_k=100):
     return fused
 
 
-# ── Main ─────────────────────────────────────────────────────
+# ======================= Main =======================
 
 def main():
     import torch
@@ -184,12 +180,12 @@ def main():
     corpus_enriched = [format_enriched(row) for _, row in corpus.iterrows()]
     corpus_specter = [format_specter(row) for _, row in corpus.iterrows()]
 
-    # ── BM25 index ──
+    # BM25 index 
     print("Tokenizing corpus for BM25 (stemmed)...")
     corpus_tokenized = [bm25_tokenize(t) for t in tqdm(corpus_enriched, desc="BM25 tokenizing")]
     bm25 = BM25Okapi(corpus_tokenized)
 
-    # ── SPECTER2 — encode corpus, then move to CPU ──
+    # SPECTER2: encode corpus, and we then move to CPU
     print(f"\nLoading {SPECTER_MODEL}...")
     tokenizer = AutoTokenizer.from_pretrained(SPECTER_MODEL)
     specter_model = AutoModel.from_pretrained(SPECTER_MODEL)
@@ -202,11 +198,11 @@ def main():
     specter_corpus_embs = encode_specter(corpus_specter, tokenizer,
                                           specter_model, batch_size=32, device=device)
 
-    # Free GPU for Jina v3 (570M fp16 needs room alongside activations)
+    # We free the GPU for Jina v3
     specter_model.to("cpu")
     torch.cuda.empty_cache()
 
-    # ── Jina v3 — encode corpus ──
+    # Jina v3 encodes the corpus 
     print(f"\nLoading {JINA_MODEL} (fp16, trust_remote_code)...")
     jina_model = AutoModel.from_pretrained(
         JINA_MODEL, trust_remote_code=True, torch_dtype=torch.float16,
@@ -216,9 +212,7 @@ def main():
     print(f"Encoding corpus with Jina v3 (max_length={JINA_MAX_LEN}, batch_size={JINA_BATCH_SIZE})...")
     jina_corpus_embs = encode_jina(corpus_enriched, jina_model)
 
-    # ══════════════════════════════════════════════════════════════
-    # Public queries — evaluate
-    # ══════════════════════════════════════════════════════════════
+    # Evaluation over public queries
     pub_ids = queries["doc_id"].tolist()
     pub_enriched = [format_enriched(row) for _, row in queries.iterrows()]
     pub_specter = [format_specter(row) for _, row in queries.iterrows()]
@@ -228,7 +222,7 @@ def main():
     jina_ranking = dense_retrieve(jina_q_embs, pub_ids,
                                    jina_corpus_embs, corpus_ids, top_k=RETRIEVAL_TOP_K)
 
-    # Swap Jina off GPU, restore SPECTER2 for query encoding
+    # We swap Jina off GPU and restore SPECTER2 for query encoding
     jina_model.to("cpu")
     torch.cuda.empty_cache()
     specter_model.to(device)
@@ -272,9 +266,8 @@ def main():
     print(f"\n--- Weighted RRF (specter=1.0, jina=1.0, bm25={best_cfg}) ---")
     evaluate(fused_best, qrels, ks=[10, 100], query_domains=query_domains, verbose=True)
 
-    # ══════════════════════════════════════════════════════════════
-    # Held-out queries — predict
-    # ══════════════════════════════════════════════════════════════
+    # Evaluation over held-out queries
+
     ho_ids = held_out["doc_id"].tolist()
     ho_enriched = [format_enriched(row) for _, row in held_out.iterrows()]
     ho_specter_texts = [format_specter(row) for _, row in held_out.iterrows()]

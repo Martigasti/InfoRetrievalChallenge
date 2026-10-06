@@ -148,10 +148,7 @@ def main():
                                               show_progress_bar=True).astype(np.float32)
 
     query_domains = dict(zip(queries["doc_id"], queries["domain"]))
-
-    # ══════════════════════════════════════════════════════════════
     # Public queries — evaluate
-    # ══════════════════════════════════════════════════════════════
     pub_ids = queries["doc_id"].tolist()
 
     # MiniLM retrieval (enriched queries too)
@@ -182,10 +179,7 @@ def main():
     fused = rrf_fuse([minilm_ranking, specter_ranking], k=RRF_K, top_k=TOP_K)
     print("\n--- RRF (MiniLM + SPECTER2) ---")
     evaluate(fused, qrels, ks=[10, 100], query_domains=query_domains, verbose=True)
-
-    # ══════════════════════════════════════════════════════════════
     # Held-out queries — predict
-    # ══════════════════════════════════════════════════════════════
     ho_ids = held_out["doc_id"].tolist()
 
     # MiniLM (enriched)

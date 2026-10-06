@@ -24,7 +24,7 @@ queries = load_queries(DATA_DIR / "queries.parquet")
 held_out = load_queries(HELD_OUT_PATH)
 qrels = load_qrels(DATA_DIR / "qrels.json")
 
-# Load pre-computed embeddings
+# Pre-computed embeddings
 query_embs, q_ids = load_embeddings(EMB_DIR / "query_embeddings.npy",
                                      EMB_DIR / "query_ids.json")
 corpus_embs, c_ids = load_embeddings(EMB_DIR / "corpus_embeddings.npy",
@@ -33,7 +33,7 @@ corpus_embs, c_ids = load_embeddings(EMB_DIR / "corpus_embeddings.npy",
 print(f"Query embeddings:  {query_embs.shape}")
 print(f"Corpus embeddings: {corpus_embs.shape}")
 
-# --- Evaluate on public queries ---
+# Evaluation over public queries
 sim_matrix = query_embs @ corpus_embs.T
 top_indices = np.argsort(-sim_matrix, axis=1)[:, :TOP_K]
 
@@ -43,7 +43,7 @@ eval_submission = {qid: [c_ids[j] for j in top_indices[i]]
 query_domains = dict(zip(queries["doc_id"], queries["domain"]))
 evaluate(eval_submission, qrels, ks=[10, 100], query_domains=query_domains, verbose=True)
 
-# --- Predict on held-out queries ---
+# Evaluation over held-out queries
 print(f"\nEncoding {len(held_out)} held-out queries with {MODEL_NAME}...")
 model = SentenceTransformer(MODEL_NAME)
 ho_texts = [format_text(row) for _, row in held_out.iterrows()]

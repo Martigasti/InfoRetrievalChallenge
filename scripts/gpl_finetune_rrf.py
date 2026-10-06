@@ -32,21 +32,21 @@ from utils import (
     format_text, get_body_chunks, evaluate,
 )
 
-# ── Known best from grid search (wider_rrf.py) ───────────────
+# ======================= Known best from grid search (wider_rrf.py) =======================
 RETRIEVAL_TOP_K = 300
 FINAL_TOP_K = 100
 RRF_K = 10
 BODY_CHUNKS = 6
 BM25_WEIGHT = 1.0   # best from wider_rrf grid search
 
-# ── Models ───────────────────────────────────────────────────
+# ======================= Models =======================
 SPECTER_MODEL     = "allenai/specter2_base"
 PROXIMITY_ADAPTER = "allenai/specter2_proximity"
 BGE_MODEL_NAME    = "BAAI/bge-large-en-v1.5"
 CE_MODEL          = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 FINETUNE_BASE     = "allenai/specter2_base"   # start from SPECTER2 (scientific pre-training)
 
-# ── GPL hyperparameters ──────────────────────────────────────
+# ======================= GPL hyperparameters =======================
 GPL_STEPS        = 20_000   # training steps (~3 epochs over 200k pairs)
 GPL_BATCH_SIZE   = 32
 GPL_LR           = 2e-5
@@ -55,7 +55,7 @@ NEG_PER_QUERY    = 1        # hard negatives per (query, pos) pair
 NEGS_TO_SKIP     = 1        # skip rank-1 (likely the positive itself or very similar)
 CE_BATCH_SIZE    = 256
 
-# ── Paths ─────────────────────────────────────────────────────
+# ======================= Paths =======================
 ROOT            = Path(__file__).resolve().parent.parent
 DATA_DIR        = ROOT / "data"
 SUBMISSIONS_DIR = ROOT / "submissions"
@@ -67,8 +67,7 @@ GPL_CE_SCORES   = CACHE_DIR / "gpl_ce_scores.json"
 GPL_MODEL_DIR   = CACHE_DIR / "gpl_finetuned_model"
 
 
-# ── Text formatting ──────────────────────────────────────────
-
+# ======================= Text formatting =======================
 def format_specter(row):
     title = str(row.get("title", "") or "").strip()
     abstract = str(row.get("abstract", "") or "").strip()
@@ -103,8 +102,7 @@ def format_short(row):
     return (title + ". " + abstract) if abstract else title
 
 
-# ── GPL Step 1: load synthetic queries ───────────────────────
-
+# ======================= GPL Step 1: load synthetic queries =======================
 def load_synthetic_queries(corpus_ids):
     if not DOC2QUERY_CACHE.exists():
         raise FileNotFoundError(
@@ -119,8 +117,7 @@ def load_synthetic_queries(corpus_ids):
     return expansions  # doc_id -> [query1, ..., query10]
 
 
-# ── GPL Step 2: mine hard negatives via BM25 ─────────────────
-
+# ======================= GPL Step 2: mine hard negatives via BM25 =======================
 def bm25_tokenize(text):
     from nltk.stem import PorterStemmer
     from nltk.corpus import stopwords
@@ -173,8 +170,7 @@ def mine_hard_negatives(expansions, corpus_ids, corpus_tokenized, bm25,
     return triplets
 
 
-# ── GPL Step 3: cross-encoder pseudo-labeling ────────────────
-
+# ======================= GPL Step 3: cross-encoder pseudo-labeling =======================
 def score_triplets_with_ce(triplets, corpus_short_by_id, ce_model, batch_size=256):
     """
     Score (query, pos) and (query, neg) with the cross-encoder.
@@ -208,8 +204,7 @@ def score_triplets_with_ce(triplets, corpus_short_by_id, ce_model, batch_size=25
     return labeled
 
 
-# ── GPL Step 4: MarginMSE fine-tuning ────────────────────────
-
+# ======================= GPL Step 4: MarginMSE fine-tuning =======================
 def finetune_with_marginmse(labeled_triplets, corpus_short_by_id,
                              base_model_name, output_dir, device,
                              steps=20_000, batch_size=32, lr=2e-5,
@@ -266,8 +261,7 @@ def finetune_with_marginmse(labeled_triplets, corpus_short_by_id,
     return st_model
 
 
-# ── Retrieval ─────────────────────────────────────────────────
-
+# ======================= Retrieval =======================
 def encode_specter(texts, tokenizer, model, batch_size=32, device="cpu"):
     import torch
     all_embs = []
@@ -299,8 +293,7 @@ def bm25_retrieve(query_texts, q_ids, corpus_tokenized, c_ids, bm25_model, top_k
     return results
 
 
-# ── Weighted RRF ──────────────────────────────────────────────
-
+# ======================= Weighted RRF =======================
 def weighted_rrf_fuse(rankings_with_weights, k=10, top_k=100):
     all_qids = set()
     for ranking, _ in rankings_with_weights:
@@ -317,8 +310,7 @@ def weighted_rrf_fuse(rankings_with_weights, k=10, top_k=100):
     return fused
 
 
-# ── Main ──────────────────────────────────────────────────────
-
+# ======================= Main =======================
 def main():
     import torch
     import nltk
@@ -342,20 +334,17 @@ def main():
     corpus_ids    = corpus["doc_id"].tolist()
     query_domains = dict(zip(queries["doc_id"], queries["domain"]))
 
-    # ── Text prep ──
+    # Text prep
     print(f"Building corpus text (chunks={BODY_CHUNKS})...")
     corpus_enriched  = [format_enriched(row) for _, row in corpus.iterrows()]
     corpus_specter   = [format_specter(row)  for _, row in corpus.iterrows()]
     corpus_short_by_id = {row["doc_id"]: format_short(row) for _, row in corpus.iterrows()}
 
-    # ── BM25 index ──
+    # BM25 index
     print("Tokenizing corpus for BM25...")
     corpus_tokenized = [bm25_tokenize(t) for t in tqdm(corpus_enriched, desc="BM25 tok")]
     bm25 = BM25Okapi(corpus_tokenized)
-
-    # ══════════════════════════════════════════════════════════════
     # GPL: fine-tune or load cached model
-    # ══════════════════════════════════════════════════════════════
     if (GPL_MODEL_DIR / "modules.json").exists():
         print(f"\nLoading cached GPL fine-tuned model from {GPL_MODEL_DIR}")
         gpl_model = SentenceTransformer(str(GPL_MODEL_DIR), device=device)
@@ -395,7 +384,7 @@ def main():
         )
         torch.cuda.empty_cache()
 
-    # ── Encode corpus with GPL model ──
+    # Encode corpus with GPL model
     print("\nEncoding corpus with GPL fine-tuned model...")
     gpl_corpus_embs = gpl_model.encode(
         corpus_enriched, normalize_embeddings=True,
@@ -406,7 +395,7 @@ def main():
     gpl_model.to("cpu")
     torch.cuda.empty_cache()
 
-    # ── SPECTER2 ──
+    # SPECTER2
     print(f"\nLoading {SPECTER_MODEL}...")
     tokenizer = AutoTokenizer.from_pretrained(SPECTER_MODEL)
     specter_model = AutoModel.from_pretrained(SPECTER_MODEL)
@@ -418,16 +407,13 @@ def main():
     specter_corpus_embs = encode_specter(corpus_specter, tokenizer,
                                           specter_model, batch_size=32, device=device)
 
-    # ── BGE-large ──
+    # BGE-large
     print(f"\nLoading {BGE_MODEL_NAME}...")
     bge_model = SentenceTransformer(BGE_MODEL_NAME)
     print("Encoding corpus with BGE-large...")
     bge_corpus_embs = bge_model.encode(corpus_enriched, normalize_embeddings=True,
                                         show_progress_bar=True).astype(np.float32)
-
-    # ══════════════════════════════════════════════════════════════
     # Public queries — retrieve + evaluate
-    # ══════════════════════════════════════════════════════════════
     pub_ids      = queries["doc_id"].tolist()
     pub_enriched = [format_enriched(row) for _, row in queries.iterrows()]
     pub_specter  = [format_specter(row)  for _, row in queries.iterrows()]
@@ -493,10 +479,7 @@ def main():
     )
     print(f"\n--- 4-way RRF + GPL (gpl_w={best_gpl_w}) ---")
     evaluate(fused_best, qrels, ks=[10, 100], query_domains=query_domains, verbose=True)
-
-    # ══════════════════════════════════════════════════════════════
     # Held-out queries
-    # ══════════════════════════════════════════════════════════════
     ho_ids      = held_out["doc_id"].tolist()
     ho_enriched = [format_enriched(row) for _, row in held_out.iterrows()]
     ho_specter  = [format_specter(row)  for _, row in held_out.iterrows()]

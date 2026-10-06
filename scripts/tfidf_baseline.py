@@ -27,7 +27,7 @@ qrels = load_qrels(DATA_DIR / "qrels.json")
 corpus_ids = corpus["doc_id"].tolist()
 corpus_texts = [format_text(row) for _, row in corpus.iterrows()]
 
-# Build TF-IDF index on corpus
+# TF-IDF index
 vectorizer = TfidfVectorizer(
     sublinear_tf=True,
     min_df=2,
@@ -38,7 +38,7 @@ vectorizer = TfidfVectorizer(
 corpus_matrix = vectorizer.fit_transform(corpus_texts)
 print(f"Corpus matrix: {corpus_matrix.shape}  vocab={corpus_matrix.shape[1]:,}")
 
-# --- Evaluate on public queries ---
+# Evaluation over public queries
 query_ids = queries["doc_id"].tolist()
 query_texts = [format_text(row) for _, row in queries.iterrows()]
 query_matrix = vectorizer.transform(query_texts)
@@ -52,7 +52,7 @@ for i, qid in enumerate(query_ids):
 query_domains = dict(zip(queries["doc_id"], queries["domain"]))
 evaluate(eval_submission, qrels, ks=[10, 100], query_domains=query_domains, verbose=True)
 
-# --- Predict on held-out queries ---
+# Evaluation over held-out queries
 ho_ids = held_out["doc_id"].tolist()
 ho_texts = [format_text(row) for _, row in held_out.iterrows()]
 ho_matrix = vectorizer.transform(ho_texts)

@@ -59,8 +59,7 @@ SUBMISSIONS_DIR = ROOT / "submissions"
 HELD_OUT_PATH = ROOT / "held_out_queries.parquet"
 
 
-# ── Text formatting ──────────────────────────────────────────
-
+# ======================= Text formatting =======================
 def format_specter(row):
     title = str(row.get("title", "") or "").strip()
     abstract = str(row.get("abstract", "") or "").strip()
@@ -96,8 +95,7 @@ def format_rerank(row):
     return title or abstract
 
 
-# ── Encoding ─────────────────────────────────────────────────
-
+# ======================= Encoding =======================
 def encode_specter(texts, tokenizer, model, batch_size=32, device="cpu"):
     import torch
     all_embs = []
@@ -113,8 +111,7 @@ def encode_specter(texts, tokenizer, model, batch_size=32, device="cpu"):
     return np.vstack(all_embs).astype(np.float32)
 
 
-# ── BM25 tokenization ───────────────────────────────────────
-
+# ======================= BM25 tokenization =======================
 def bm25_tokenize(text):
     from nltk.stem import PorterStemmer
     from nltk.corpus import stopwords
@@ -125,8 +122,7 @@ def bm25_tokenize(text):
     return [stemmer.stem(t) for t in tokens if t not in stops and len(t) > 1]
 
 
-# ── BM25 with Pseudo-Relevance Feedback ─────────────────────
-
+# ======================= BM25 with Pseudo-Relevance Feedback =======================
 def bm25_prf_retrieve(query_texts, q_ids, corpus_tokenized, c_ids, bm25_model,
                       top_k, prf_top=5, prf_terms=20):
     """
@@ -180,8 +176,7 @@ def bm25_prf_retrieve(query_texts, q_ids, corpus_tokenized, c_ids, bm25_model,
     return results, scores_dict
 
 
-# ── Dense retrieval with scores ──────────────────────────────
-
+# ======================= Dense retrieval with scores =======================
 def dense_retrieve_with_scores(query_embs, q_ids, corpus_embs, c_ids, top_k):
     sim_matrix = query_embs @ corpus_embs.T
     top_indices = np.argsort(-sim_matrix, axis=1)[:, :top_k]
@@ -194,8 +189,7 @@ def dense_retrieve_with_scores(query_embs, q_ids, corpus_embs, c_ids, top_k):
     return rankings, scores
 
 
-# ── Score-level fusion ───────────────────────────────────────
-
+# ======================= Score-level fusion =======================
 def score_fuse(specter_scores, bm25_scores, alpha, top_k=100):
     """
     Fuse by normalised score interpolation:
@@ -236,8 +230,7 @@ def score_fuse(specter_scores, bm25_scores, alpha, top_k=100):
     return fused
 
 
-# ── Reranking ────────────────────────────────────────────────
-
+# ======================= Reranking =======================
 def rerank_topk(fused_ranking, query_texts_by_id, doc_text_by_id,
                 reranker, top_rerank=50):
     reranked = {}
@@ -256,8 +249,7 @@ def rerank_topk(fused_ranking, query_texts_by_id, doc_text_by_id,
     return reranked
 
 
-# ── Main ─────────────────────────────────────────────────────
-
+# ======================= Main =======================
 def main():
     import torch
     import nltk
@@ -289,12 +281,12 @@ def main():
         row["doc_id"]: format_rerank(row) for _, row in corpus.iterrows()
     }
 
-    # ── BM25 index ──
+    # BM25 index
     print("Tokenizing corpus for BM25...")
     corpus_tokenized = [bm25_tokenize(t) for t in tqdm(corpus_enriched, desc="BM25 tokenizing")]
     bm25 = BM25Okapi(corpus_tokenized)
 
-    # ── SPECTER2 ──
+    # SPECTER2
     print(f"\nLoading {SPECTER_MODEL}...")
     tokenizer = AutoTokenizer.from_pretrained(SPECTER_MODEL)
     specter_model = AutoModel.from_pretrained(SPECTER_MODEL)
@@ -305,10 +297,7 @@ def main():
     print("Encoding corpus with SPECTER2...")
     specter_corpus_embs = encode_specter(corpus_specter, tokenizer,
                                           specter_model, batch_size=32, device=device)
-
-    # ══════════════════════════════════════════════════════════════
     # Public queries — retrieve + grid search + rerank
-    # ══════════════════════════════════════════════════════════════
     pub_ids      = queries["doc_id"].tolist()
     pub_enriched = [format_enriched(row) for _, row in queries.iterrows()]
     pub_specter  = [format_specter(row)  for _, row in queries.iterrows()]
@@ -349,7 +338,7 @@ def main():
     print(f"\n--- Score fusion baseline (alpha={best_alpha}, no reranker) ---")
     evaluate(fused_best, qrels, ks=[10, 100], query_domains=query_domains, verbose=True)
 
-    # ── Free SPECTER2, load reranker ──
+    # Free SPECTER2, load reranker
     print("Freeing SPECTER2 from GPU for reranker...")
     specter_model.to("cpu")
     torch.cuda.empty_cache()
@@ -365,10 +354,7 @@ def main():
 
     print(f"\n--- Score fusion + reranker (alpha={best_alpha}, top-{RERANK_TOP_K}) ---")
     evaluate(reranked, qrels, ks=[10, 100], query_domains=query_domains, verbose=True)
-
-    # ══════════════════════════════════════════════════════════════
     # Held-out queries — predict
-    # ══════════════════════════════════════════════════════════════
     ho_ids      = held_out["doc_id"].tolist()
     ho_enriched = [format_enriched(row) for _, row in held_out.iterrows()]
     ho_specter  = [format_specter(row)  for _, row in held_out.iterrows()]
